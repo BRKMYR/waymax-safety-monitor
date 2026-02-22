@@ -173,4 +173,4 @@ MIT
 
 ## Author
 
-BRKMYR
+[BRKMYR](https://github.com/BRKMYR)
