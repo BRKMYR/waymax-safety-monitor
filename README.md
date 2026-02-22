@@ -1,5 +1,7 @@
 # Operational Safety Zones
 
+**Status: In Development — Q1 2026**
+
 A simulation and visualization platform for managing Operational Safety Zones for autonomous vehicles. Renders a top-down tactical map view of London showing geo-fenced zones where autonomous vehicles can operate, with real-time monitoring of zone status, [redacted] compliance, and route safety validation.
 
 ---
