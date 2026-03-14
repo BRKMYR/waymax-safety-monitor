@@ -2,7 +2,7 @@
 
 **Status: In Development — Q1 2026**
 
-A real-time 2D safety monitoring dashboard built on top of Waymo's open-source Waymax simulator and the Waymo Open Motion Dataset. Renders top-down tactical views of real driving scenarios from San Francisco and Phoenix, overlaying per-vehicle risk assessment, teleoperation trigger detection, and fleet-level safety scoring.
+Real-time safety monitoring dashboard for autonomous fleets — teleoperation trigger detection built on Waymax and Waymo Open Motion Dataset.
 
 This is an operations monitoring screen, not a simulator. It answers one question: **when should a remote operator take over?**
 

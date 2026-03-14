@@ -1,0 +1,15 @@
+{
+    "scenario": "intersection_conflict",
+    "seed": 42,
+    "trigger_policy": "default",
+    "risk_config": {
+        "weight_overlap": 0.25,
+        "weight_offroad": 0.15,
+        "weight_wrong_way": 0.15,
+        "weight_ttc": 0.25,
+        "weight_lane_compliance": 0.20,
+        "ttc_safe": 6.0,
+        "amber_threshold": 0.3,
+        "red_threshold": 0.6
+    }
+}
