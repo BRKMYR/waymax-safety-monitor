@@ -1,182 +1,214 @@
-# Operational Safety Zones
+# Waymax Safety Monitor Dashboard
 
 **Status: In Development — Q1 2026**
 
-A simulation and visualization platform for managing Operational Safety Zones for urban robotaxi operations. Renders a top down tactical map view of London showing geo-fenced zones where autonomous ride hailing vehicles can operate, with real time monitoring of zone status, [redacted] compliance, and route safety validation.
+A real-time 2D safety monitoring dashboard built on top of Waymo's open-source Waymax simulator and the Waymo Open Motion Dataset. Renders top-down tactical views of real driving scenarios from San Francisco and Phoenix, overlaying per-vehicle risk assessment, teleoperation trigger detection, and fleet-level safety scoring.
 
-This project focuses on **urban autonomous mobility**, not highway ADAS. Urban environments present fundamentally different challenges: pedestrian density, unprotected turns, cyclists, construction, events, and complex intersections that highway [redacted] definitions do not address.
+This is an operations monitoring screen, not a simulator. It answers one question: **when should a remote operator take over?**
 
 ---
 
 ## Why This Matters
 
-Autonomous ride hailing will not launch everywhere at once. Commercial robotaxi deployment begins with carefully scoped urban zones where the vehicle's capabilities are validated for the specific operational environment. This is not a limitation; it is the architecture of real world urban autonomy.
+Commercial robotaxi fleets rely on remote human operators as a safety backstop. This is not a failure mode; it is the architecture. Waymo, Cruise, and Zoox all employ teleoperators who can intervene when a vehicle encounters a situation beyond its autonomous capabilities. The ratio of operators to vehicles, the latency of intervention, and the decision criteria for when to intervene are among the most operationally critical parameters in any commercial AV deployment.
 
-The challenge in urban environments is orders of magnitude harder than highway automation:
+The unsolved problem is **when** to trigger teleoperation. Too early wastes expensive human operator time and reduces fleet throughput. Too late creates safety incidents. Current approaches are largely reactive: the vehicle requests help when it is already stuck or uncertain. A monitoring dashboard enables **proactive** intervention by giving operators situational awareness before the vehicle reaches a failure state.
 
-- **Urban intersections** involve unprotected turns, pedestrian crossings, cyclists, and multi-modal traffic that create combinatorial edge cases no highway [redacted] encounters.
-- **Dynamic conditions** shift block by block: a school zone at 8am, a construction site by noon, a street market on weekends. Zone status must reflect hyper-local, time-varying conditions.
-- **Cities and regulators** need to define where robotaxis can operate, under what conditions, and with what constraints. They need auditable zone configurations tied to local authority requirements.
-- **Robotaxi operators** need to monitor zone status in real time and ensure their fleets only operate within approved boundaries. A single vehicle operating outside its [redacted] is a safety incident and a regulatory crisis.
-- **Route planning systems** need to validate that every meter of a planned route falls within an active, compliant [redacted] zone before dispatching a vehicle to pick up a passenger.
+This project uses real driving data from the Waymo Open Motion Dataset — logged scenarios from Waymo's fleet operating in San Francisco and Phoenix. These are not synthetic toy environments. They contain the full complexity of urban driving: unprotected turns, pedestrian crossings, cyclists, construction zones, and multi-agent interactions that expose the edge cases where teleoperation decisions matter most.
 
-Urban [redacted] zone management is the operational backbone of commercial robotaxi deployment. Without it, autonomous ride hailing cannot scale beyond controlled pilots.
+The gap between "autonomous vehicle that works in simulation" and "autonomous fleet that operates commercially" is an operations problem. This dashboard sits in that gap.
 
 ---
 
 ## What This Project Does
 
-Operational Safety Zones is a self contained simulation platform that models the full operational lifecycle of urban robotaxi zone management for London. It combines a real time 2D map renderer with a zone management engine, fleet simulation, and compliance layer.
+Takes Waymax scenarios — each containing 9.1 seconds of multi-agent driving data from real San Francisco and Phoenix roads — runs them through a safety analysis pipeline, and renders the results as a real-time ops dashboard in pygame. The dashboard shows what a fleet safety operator would see: a tactical map of the scenario, risk indicators per vehicle, teleoperation trigger alerts, and an event timeline.
 
-The system ingests real geospatial data (OpenStreetMap / Overture Maps), renders it as a top down tactical map, and overlays operational zones with live status. A simulated robotaxi fleet operates within the zones, subject to dynamic urban conditions and [redacted] constraints.
+What this is **not**:
 
-This is a planning, monitoring, and validation tool for fleet operators and city authorities, not a vehicle autonomy stack. It operates at the city and fleet level, not at the vehicle perception level.
+- Not a self-driving stack. No perception, no planning, no control.
+- Not a simulator. Waymax is the simulator. This is a monitoring layer on top.
+- Not a web app. Native 2D rendering for full control over the visual output and update loop.
 
 ---
 
-## Key Components
+## Dashboard Components
 
-### 1. Top Down Map Renderer
+### 1. Top-Down Scenario Viewer
 
-Real time 2D map visualization of London using OpenStreetMap and Overture Maps data. Renders road networks, building footprints, and zone boundaries in a clean, high contrast style inspired by tactical map systems. Supports pan, zoom, and layer toggling. The map is the primary interface; all other components are rendered on top of it.
+Renders the Waymax road graph — lanes, crosswalks, stop signs, speed bumps, road boundaries — as a 2D tactical map. All agents (ego vehicle, other vehicles, pedestrians, cyclists) are drawn as oriented bounding boxes with heading indicators. The viewer supports scenario playback: play, pause, step forward, step backward, and timeline scrubbing across all 91 timesteps.
 
-### 2. Urban [redacted] Zone Management
+The coordinate system comes directly from Waymax. No projection pipeline needed; the data is already in local metric coordinates centered on the ego vehicle.
 
-Define, edit, and monitor [redacted]s as geographic polygons tailored for urban robotaxi operations. Each zone carries a structured attribute set:
+### 2. Per-Vehicle Risk Indicators
 
-- Speed limits (per road segment or zone wide)
-- Weather constraints (visibility minimums, precipitation thresholds)
-- Time of day restrictions (school zones, nightlife districts, market hours)
-- Pedestrian density thresholds (high footfall areas, event proximity)
-- Road type constraints (single carriageway, multi-lane, shared space, pedestrianized)
-- Intersection complexity ratings (signalized, roundabout, unprotected turns)
+Each vehicle carries a colored halo indicating its current risk level:
 
-Zones are versioned. Changes to zone definitions are tracked with timestamps and authorship.
+| Level | Meaning |
+|-------|---------|
+| **GREEN** | Nominal. No safety concerns detected. |
+| **AMBER** | Elevated risk. One or more metrics approaching thresholds. Operator should monitor. |
+| **RED** | Critical. Immediate teleoperation trigger. Operator intervention recommended. |
 
-### 3. Dynamic Zone Status
+Risk classification is computed per timestep from a composite of proximity, speed, lane compliance, and heading alignment metrics. Halos are rendered as semi-transparent rings around the vehicle bounding box, with intensity proportional to risk severity.
 
-Zones have a real time status derived from live urban conditions:
+### 3. Teleoperation Trigger Panel
 
-| Status | Meaning |
-|--------|---------|
-| **GREEN** | Fully operational. All [redacted] constraints satisfied. |
-| **AMBER** | Degraded. One or more constraints approaching limits. Vehicles may continue with restrictions (reduced speed, no new pickups). |
-| **RED** | Suspended. [redacted] violated. No autonomous operation permitted. Active vehicles must complete current ride and exit zone. |
+A side panel listing vehicles that have crossed intervention thresholds. Each trigger entry shows:
 
-Status changes are triggered by weather degradation, construction activity, traffic incidents, public events (football matches, protests, markets), or time based activation schedules. All status transitions are logged with cause attribution.
+- Vehicle ID
+- Trigger reason (e.g., "TTC < 2.0s with pedestrian", "off-road excursion", "wrong-way heading")
+- Severity (amber / red)
+- Timestamp within the scenario
 
-### 4. Route Safety Validation
+Trigger conditions are configurable. Thresholds can be adjusted to model different operator intervention policies — conservative (trigger early, high operator load) versus permissive (trigger late, higher autonomy trust).
 
-Given a proposed route (pickup to destination), the system validates whether the entire path stays within approved, active [redacted] zones. The validator:
+### 4. Incident Timeline
 
-- Flags every zone transition along the route
-- Identifies gaps in [redacted] coverage (road segments outside any zone)
-- Calculates safety margins (distance to zone boundaries)
-- Reports [redacted] constraint mismatches (e.g., route passes through a zone with pedestrian density above vehicle capability)
-- Evaluates intersection complexity along the route
+A scrollable chronological log of safety events during scenario playback. Events include near-misses, lane departures, speed violations, bounding box overlaps, and teleoperation triggers. Each event entry is timestamped relative to scenario start (0.0s to 9.1s) and selectable — clicking an event jumps the scenario viewer to that timestep.
 
-Routes that fail validation are rejected with a structured report explaining each failure. No passenger is dispatched on an invalid route.
+The timeline serves as both a real-time feed during playback and a post-hoc analysis tool for reviewing what happened and when.
 
-### 5. Fleet Monitoring Dashboard
+### 5. Fleet Aggregate Panel
 
-A simulated robotaxi fleet operates within the zone network. The dashboard tracks:
+Top-level statistics across all agents in the current scenario:
 
-- Vehicle positions (real time on the map)
-- Per vehicle [redacted] compliance status
-- Proximity to zone boundaries (with configurable warning thresholds)
-- Passenger status: en route to pickup, passenger on board, returning to depot
-- Handoff triggers: conditions under which a vehicle must transition to remote operator control
-- Fleet level statistics: vehicles in zone, vehicles approaching boundaries, active handoff events
+- Fleet safety score (weighted composite of all per-vehicle risk scores)
+- Total violations by category (overlap, off-road, wrong-way)
+- Total teleoperation triggers fired
+- Worst-case vehicle and worst-case timestep
+- Agent count breakdown (vehicles, pedestrians, cyclists)
 
-### 6. Regulatory Compliance Layer
+---
 
-Zone configurations are mapped to regulatory requirements:
+## Safety Metrics
 
-- UK Automated Vehicles Act framework
-- EU AI Act risk classification for high risk AI systems
-- Local authority approval boundaries (borough level permissions)
-- TfL (Transport for London) coordination requirements
+| Metric | Source | Description |
+|--------|--------|-------------|
+| Collision / Overlap | Waymax `overlap` | Bounding box overlap between any two agents |
+| Off-Road | Waymax `offroad` | Vehicle center or bounding box outside drivable area |
+| Wrong-Way | Waymax `wrong_way` | Vehicle heading misaligned with lane direction |
+| Log Divergence | Waymax `log_divergence` | Deviation from the recorded real-world trajectory |
+| Time to Collision (TTC) | Custom | Estimated time until bounding box intersection at current velocities |
+| Lane Compliance Score | Custom | Composite of lateral offset from lane center and heading alignment |
 
-The system can export zone specifications in structured formats suitable for regulatory submission and audit.
+Waymax provides the first four metrics natively through its reward/metric API. TTC and lane compliance are custom metrics computed from Waymax state data (agent positions, velocities, headings, and road graph geometry).
+
+The composite risk score that drives the green/amber/red classification is a weighted combination of all six metrics, with weights configurable per deployment policy.
 
 ---
 
 ## Visual Design
 
-The map renderer uses a dark theme, high contrast aesthetic. Design principles:
+The dashboard uses a dark theme, high contrast aesthetic. Design principles:
 
-- **Dark background** with light road networks and muted building footprints. The map recedes; operational data comes forward.
-- **Zone overlays** rendered as semi transparent colored polygons. GREEN, AMBER, RED status is immediately readable at a glance.
-- **Zone boundaries** drawn as clean vector outlines with optional dashed patterns for pending or draft zones.
-- **Vehicle icons** are simple geometric markers (oriented triangles or chevrons) with color coded compliance halos.
-- **Route lines** rendered as directional paths with safety margin buffers visualized as shaded corridors.
-- **Information density is controlled by zoom level.** Zoomed out: zone status overview. Zoomed in: individual vehicles, road level [redacted] attributes, boundary warnings.
+- **Dark background** with light road graph edges and muted lane boundaries. The map recedes; operational data comes forward.
+- **Agent bounding boxes** rendered as oriented rectangles with heading arrows. Ego vehicle visually distinct from other agents.
+- **Risk halos** as semi-transparent colored rings around vehicles. Color intensity scales with risk severity.
+- **Side panels** use monospace text for the teleoperation trigger list and incident timeline. Dense, scannable, no decoration.
+- **Information hierarchy** controlled by visual weight. Critical alerts (red halos, active triggers) dominate. Nominal state (green halos, empty timeline) fades into the background.
 
-The visual language is deliberately utilitarian, closer to an air traffic control display or military tactical map than a consumer ride hailing app.
+The visual language is deliberately utilitarian — closer to an air traffic control display than a consumer ride-hailing app. Every pixel carries operational meaning.
 
 ---
 
-## Planned Tech Stack
+## Tech Stack
 
 | Layer | Technology |
 |-------|------------|
-| 2D Rendering | `pygame-ce` |
-| Geospatial Data | OpenStreetMap, Overture Maps Foundation |
-| Data Formats | GeoJSON, GeoParquet |
-| Geospatial Queries | DuckDB (with spatial extension) |
-| Geometry Operations | Shapely |
+| Simulation Engine | Waymax (JAX-based) |
+| Driving Data | Waymo Open Motion Dataset (WOMD) |
+| 2D Rendering | pygame-ce |
+| Computation | JAX, NumPy |
+| Safety Metrics | Waymax metrics + custom |
 | Language | Python |
-| Dashboard Backend (optional) | FastAPI |
 
-The stack is intentionally lightweight. No browser based map frameworks. The renderer is a native 2D engine for full control over the visual output and update loop.
+The stack is intentionally minimal. Waymax provides the simulation backbone and data pipeline. pygame-ce provides the rendering surface. Everything between is Python and NumPy.
+
+JAX is required as a Waymax dependency. GPU acceleration via CUDA is beneficial for batch scenario processing but not mandatory — JAX runs on CPU for single-scenario dashboard use.
+
+---
+
+## Data
+
+This project uses the **Waymo Open Motion Dataset (WOMD)**, which contains real logged driving scenarios from Waymo's autonomous fleet operating in San Francisco and Phoenix.
+
+- Each scenario is approximately 9.1 seconds at 10Hz (91 timesteps)
+- Scenarios contain: full road graph (lanes, boundaries, crosswalks, signals), all agent trajectories (vehicles, pedestrians, cyclists), and traffic signal states
+- The dataset contains 100,000+ scenarios covering diverse urban driving situations
+- Data access requires free registration at [waymo.com/open](https://waymo.com/open)
+
+The dataset is available for non-commercial research use under the Waymo Open Dataset License. This is real driving data, not synthetic generation — every scenario in the dataset was recorded by a Waymo vehicle on public roads.
 
 ---
 
 ## Project Roadmap
 
-### Phase 1: Map Foundation
+### Phase 1: Data Pipeline and Scenario Rendering
 
-- Ingest and parse London map data (road network, building footprints) from Overture Maps / OSM
-- Implement the top down 2D renderer with pan, zoom, and layer control
-- Establish the coordinate system and projection pipeline (WGS84 to screen space)
+- Set up Waymax data loading from WOMD
+- Parse road graph (lanes, crosswalks, boundaries, traffic signals)
+- Render top-down scenario view in pygame-ce (road graph + agent bounding boxes)
+- Implement scenario playback controls (play, pause, step, scrub)
 
-### Phase 2: Zone Engine
+### Phase 2: Safety Metrics Engine
 
-- Define the urban [redacted] zone data model (polygon geometry, attribute schema, versioning)
-- Implement zone creation, editing, and persistence
-- Build the dynamic status engine (condition evaluation, status transitions, logging)
-- Implement route safety validation with intersection complexity scoring
+- Integrate Waymax built-in metrics (overlap, offroad, wrong_way, log_divergence)
+- Implement custom TTC calculation between all agent pairs
+- Build lane compliance scoring from road graph geometry
+- Compute per-vehicle composite risk score (green / amber / red classification)
+- Render risk halos on the scenario viewer
 
-### Phase 3: Fleet Simulation
+### Phase 3: Teleoperation Trigger System
 
-- Simulate robotaxi movement along road networks within zones
-- Implement [redacted] compliance checking per vehicle per frame
-- Build zone boundary proximity detection and handoff trigger logic
-- Model passenger pickup and dropoff cycles
+- Define configurable trigger thresholds (TTC < Xs, risk score > Y)
+- Build trigger detection engine evaluating every timestep
+- Render teleoperation trigger panel with live alerts
+- Build incident timeline with event logging
+- Implement timeline-to-viewer linking (click event to jump to timestep)
 
-### Phase 4: Dashboard and Compliance
+### Phase 4: Fleet Dashboard and Polish
 
-- Fleet monitoring overlay (vehicle tracking, compliance indicators, statistics)
-- Regulatory compliance mapping and zone spec export
-- Borough level permission boundaries for London local authorities
-- Optional FastAPI backend for serving dashboard data
+- Aggregate statistics panel (fleet safety score, violation counts)
+- Multi-scenario batch analysis (run N scenarios, aggregate results)
+- Dashboard layout refinement and visual polish
+- Screenshot and recording export for presentation
+- Documentation and usage guide
+
+---
+
+## Project Structure
+
+```
+waymax-safety-monitor/
+├── src/
+│   ├── data/           # Waymax data loading and preprocessing
+│   ├── metrics/        # Safety metrics (built-in + custom TTC, lane compliance)
+│   ├── triggers/       # Teleoperation trigger logic and thresholds
+│   ├── renderer/       # pygame-ce rendering (map, agents, halos, panels)
+│   └── dashboard/      # Dashboard layout, state management, playback controls
+├── scenarios/          # Sample scenario configurations
+├── tests/
+├── README.md
+└── pyproject.toml
+```
 
 ---
 
 ## References
 
-- **BSI PAS 1883:2020** — [redacted] taxonomy for automated driving systems
-- **UK Automated Vehicles Act 2024** — Legislative framework for self driving vehicle authorization in the UK
-- **EU AI Act (Regulation 2024/1689)** — Risk based classification framework; autonomous driving classified as high risk AI
+- **Waymax** — Gulino et al., "Waymax: An Accelerated, Data-Driven Simulator for Large-Scale Autonomous Driving Research" (2023). [GitHub](https://github.com/waymo-research/waymax)
+- **Waymo Open Motion Dataset** — Ettinger et al., "Large Scale Interactive Motion Forecasting for Autonomous Driving: The Waymo Open Motion Dataset" (2021). [waymo.com/open](https://waymo.com/open)
 - **SAE J3016** — Taxonomy and definitions for terms related to driving automation systems
 - **ISO 34503** — Taxonomy for [redacted] for automated driving systems
-- **Overture Maps Foundation** — Open map data schema and datasets (buildings, transportation, places)
 
 ---
 
 ## License
 
 MIT
+
+This project's source code is MIT licensed. Note that Waymax and the Waymo Open Motion Dataset have their own license terms (non-commercial research use). See their respective repositories for details.
 
 ---
 
