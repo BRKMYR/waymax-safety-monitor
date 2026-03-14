@@ -1,0 +1,497 @@
+"""Generate synthetic demo scenarios for development without WOMD data.
+
+Creates realistic-looking multi-agent urban driving scenarios with
+intersections, lane structures, and diverse agent behaviors.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+from src.data.scenario import (
+    AgentTrajectory,
+    AgentType,
+    Crosswalk,
+    LaneLine,
+    RoadEdge,
+    RoadGraph,
+    Scenario,
+    SignalState,
+    TrafficSignal,
+)
+
+
+def _make_lane(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    n_points: int = 20,
+    lane_type: str = "center",
+    lane_id: int = 0,
+) -> LaneLine:
+    points = np.linspace(start, end, n_points, dtype=np.float32)
+    return LaneLine(points=points, lane_type=lane_type, lane_id=lane_id)
+
+
+def _make_curved_trajectory(
+    start_xy: tuple[float, float],
+    start_heading: float,
+    speed: float,
+    num_timesteps: int,
+    dt: float,
+    turn_rate: float = 0.0,
+    accel: float = 0.0,
+    noise_scale: float = 0.05,
+    rng: np.random.Generator | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Generate a smooth trajectory with optional turning and acceleration."""
+    if rng is None:
+        rng = np.random.default_rng()
+
+    x = np.zeros(num_timesteps, dtype=np.float32)
+    y = np.zeros(num_timesteps, dtype=np.float32)
+    heading = np.zeros(num_timesteps, dtype=np.float32)
+    vx = np.zeros(num_timesteps, dtype=np.float32)
+    vy = np.zeros(num_timesteps, dtype=np.float32)
+
+    cx, cy = start_xy
+    h = start_heading
+    s = speed
+
+    for t in range(num_timesteps):
+        x[t] = cx + rng.normal(0, noise_scale)
+        y[t] = cy + rng.normal(0, noise_scale)
+        heading[t] = h
+        vx[t] = s * np.cos(h)
+        vy[t] = s * np.sin(h)
+
+        h += turn_rate * dt
+        s = max(0.0, s + accel * dt)
+        cx += s * np.cos(h) * dt
+        cy += s * np.sin(h) * dt
+
+    return x, y, heading, vx, vy
+
+
+def _build_intersection_road_graph() -> RoadGraph:
+    """Build a 4-way intersection road graph."""
+    lanes = []
+    lane_id = 0
+
+    # East-west lanes (main road)
+    for y_off in [-3.5, -1.75, 1.75, 3.5]:
+        lanes.append(
+            _make_lane((-80, y_off), (80, y_off), lane_type="center", lane_id=lane_id)
+        )
+        lane_id += 1
+
+    # North-south lanes (cross street)
+    for x_off in [-3.5, -1.75, 1.75, 3.5]:
+        lanes.append(
+            _make_lane((x_off, -80), (x_off, 80), lane_type="center", lane_id=lane_id)
+        )
+        lane_id += 1
+
+    # Lane boundaries for east-west road
+    for y_off in [-5.25, 0.0, 5.25]:
+        lanes.append(
+            _make_lane((-80, y_off), (80, y_off), lane_type="left_boundary", lane_id=lane_id)
+        )
+        lane_id += 1
+
+    # Lane boundaries for north-south road
+    for x_off in [-5.25, 0.0, 5.25]:
+        lanes.append(
+            _make_lane((x_off, -80), (x_off, 80), lane_type="left_boundary", lane_id=lane_id)
+        )
+        lane_id += 1
+
+    # Road edges
+    road_edges = [
+        RoadEdge(
+            points=np.array([[-80, -5.25], [80, -5.25]], dtype=np.float32),
+            edge_type="boundary",
+        ),
+        RoadEdge(
+            points=np.array([[-80, 5.25], [80, 5.25]], dtype=np.float32),
+            edge_type="boundary",
+        ),
+        RoadEdge(
+            points=np.array([[-5.25, -80], [-5.25, 80]], dtype=np.float32),
+            edge_type="boundary",
+        ),
+        RoadEdge(
+            points=np.array([[5.25, -80], [5.25, 80]], dtype=np.float32),
+            edge_type="boundary",
+        ),
+    ]
+
+    # Crosswalks at the intersection
+    crosswalks = [
+        Crosswalk(
+            polygon=np.array(
+                [[-6, 6], [-6, 8], [6, 8], [6, 6]], dtype=np.float32
+            )
+        ),
+        Crosswalk(
+            polygon=np.array(
+                [[-6, -8], [-6, -6], [6, -6], [6, -8]], dtype=np.float32
+            )
+        ),
+        Crosswalk(
+            polygon=np.array(
+                [[6, -6], [8, -6], [8, 6], [6, 6]], dtype=np.float32
+            )
+        ),
+        Crosswalk(
+            polygon=np.array(
+                [[-8, -6], [-6, -6], [-6, 6], [-8, 6]], dtype=np.float32
+            )
+        ),
+    ]
+
+    # Stop signs
+    stop_signs = np.array(
+        [[-6, -6], [-6, 6], [6, -6], [6, 6]], dtype=np.float32
+    )
+
+    return RoadGraph(
+        lanes=lanes,
+        road_edges=road_edges,
+        crosswalks=crosswalks,
+        stop_signs=stop_signs,
+    )
+
+
+def load_demo_scenario(
+    scenario_name: str = "intersection_conflict",
+    seed: int = 42,
+) -> Scenario:
+    """Load a pre-built demo scenario.
+
+    Available scenarios:
+        - "intersection_conflict": Multi-agent intersection with near-miss
+        - "highway_merge": Highway merge with aggressive lane change
+        - "pedestrian_crossing": Pedestrian crossing with approaching vehicles
+    """
+    rng = np.random.default_rng(seed)
+    num_timesteps = 91
+    dt = 0.1
+
+    if scenario_name == "highway_merge":
+        return _build_highway_merge(rng, num_timesteps, dt)
+    elif scenario_name == "pedestrian_crossing":
+        return _build_pedestrian_crossing(rng, num_timesteps, dt)
+    else:
+        return _build_intersection_conflict(rng, num_timesteps, dt)
+
+
+def _build_intersection_conflict(
+    rng: np.random.Generator, num_timesteps: int, dt: float
+) -> Scenario:
+    """Intersection scenario with near-miss conflict."""
+    road_graph = _build_intersection_road_graph()
+    agents: list[AgentTrajectory] = []
+
+    # Ego vehicle: approaching intersection from west, going straight
+    x, y, h, vx, vy = _make_curved_trajectory(
+        start_xy=(-60, -1.75), start_heading=0.0, speed=12.0,
+        num_timesteps=num_timesteps, dt=dt, accel=-1.5, rng=rng,
+    )
+    agents.append(AgentTrajectory(
+        agent_id=0, agent_type=AgentType.VEHICLE,
+        x=x, y=y, heading=h, vx=vx, vy=vy,
+        length=4.5, width=2.0, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    # Cross-traffic vehicle: approaching from south, turning left
+    x, y, h, vx, vy = _make_curved_trajectory(
+        start_xy=(1.75, -55), start_heading=np.pi / 2, speed=10.0,
+        num_timesteps=num_timesteps, dt=dt, turn_rate=-0.02, rng=rng,
+    )
+    agents.append(AgentTrajectory(
+        agent_id=1, agent_type=AgentType.VEHICLE,
+        x=x, y=y, heading=h, vx=vx, vy=vy,
+        length=4.8, width=2.1, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    # Oncoming vehicle: approaching from east
+    x, y, h, vx, vy = _make_curved_trajectory(
+        start_xy=(50, 1.75), start_heading=np.pi, speed=11.0,
+        num_timesteps=num_timesteps, dt=dt, accel=-0.5, rng=rng,
+    )
+    agents.append(AgentTrajectory(
+        agent_id=2, agent_type=AgentType.VEHICLE,
+        x=x, y=y, heading=h, vx=vx, vy=vy,
+        length=5.0, width=2.0, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    # Pedestrian crossing at the intersection
+    x, y, h, vx, vy = _make_curved_trajectory(
+        start_xy=(-4, 7), start_heading=-np.pi / 2, speed=1.4,
+        num_timesteps=num_timesteps, dt=dt, noise_scale=0.02, rng=rng,
+    )
+    valid = np.ones(num_timesteps, dtype=bool)
+    valid[:20] = False  # appears at t=20
+    agents.append(AgentTrajectory(
+        agent_id=3, agent_type=AgentType.PEDESTRIAN,
+        x=x, y=y, heading=h, vx=vx, vy=vy,
+        length=0.5, width=0.5, valid=valid,
+    ))
+
+    # Cyclist on the road
+    x, y, h, vx, vy = _make_curved_trajectory(
+        start_xy=(-40, -3.5), start_heading=0.0, speed=5.0,
+        num_timesteps=num_timesteps, dt=dt, rng=rng,
+    )
+    agents.append(AgentTrajectory(
+        agent_id=4, agent_type=AgentType.CYCLIST,
+        x=x, y=y, heading=h, vx=vx, vy=vy,
+        length=1.8, width=0.7, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    # Parked vehicle on the side
+    x = np.full(num_timesteps, 25.0, dtype=np.float32)
+    y = np.full(num_timesteps, -4.5, dtype=np.float32)
+    agents.append(AgentTrajectory(
+        agent_id=5, agent_type=AgentType.VEHICLE,
+        x=x, y=y,
+        heading=np.zeros(num_timesteps, dtype=np.float32),
+        vx=np.zeros(num_timesteps, dtype=np.float32),
+        vy=np.zeros(num_timesteps, dtype=np.float32),
+        length=4.5, width=2.0, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    # Traffic signals
+    signals = [
+        TrafficSignal(
+            position=np.array([-6, 6], dtype=np.float32),
+            states=_make_signal_cycle(num_timesteps, offset=0),
+            lane_id=0,
+        ),
+        TrafficSignal(
+            position=np.array([6, -6], dtype=np.float32),
+            states=_make_signal_cycle(num_timesteps, offset=0),
+            lane_id=1,
+        ),
+        TrafficSignal(
+            position=np.array([6, 6], dtype=np.float32),
+            states=_make_signal_cycle(num_timesteps, offset=30),
+            lane_id=4,
+        ),
+        TrafficSignal(
+            position=np.array([-6, -6], dtype=np.float32),
+            states=_make_signal_cycle(num_timesteps, offset=30),
+            lane_id=5,
+        ),
+    ]
+
+    return Scenario(
+        scenario_id="demo_intersection_conflict",
+        num_timesteps=num_timesteps,
+        timestep_duration=dt,
+        agents=agents,
+        road_graph=road_graph,
+        traffic_signals=signals,
+        ego_agent_id=0,
+    )
+
+
+def _build_highway_merge(
+    rng: np.random.Generator, num_timesteps: int, dt: float
+) -> Scenario:
+    """Highway merge scenario with aggressive lane change."""
+    lanes = []
+    lane_id = 0
+
+    # Three highway lanes
+    for y_off in [-3.5, 0.0, 3.5]:
+        lanes.append(
+            _make_lane((-100, y_off), (100, y_off), n_points=40, lane_id=lane_id)
+        )
+        lane_id += 1
+
+    # Lane boundaries
+    for y_off in [-5.25, -1.75, 1.75, 5.25]:
+        lanes.append(
+            _make_lane((-100, y_off), (100, y_off), lane_type="left_boundary", lane_id=lane_id)
+        )
+        lane_id += 1
+
+    # Merge ramp
+    ramp_points = np.array(
+        [[-100, 15], [-80, 12], [-60, 9], [-40, 7], [-20, 5.25]],
+        dtype=np.float32,
+    )
+    lanes.append(LaneLine(points=ramp_points, lane_type="center", lane_id=lane_id))
+
+    road_edges = [
+        RoadEdge(points=np.array([[-100, -5.25], [100, -5.25]], dtype=np.float32)),
+        RoadEdge(points=np.array([[-100, 5.25], [100, 5.25]], dtype=np.float32)),
+    ]
+
+    road_graph = RoadGraph(lanes=lanes, road_edges=road_edges)
+    agents: list[AgentTrajectory] = []
+
+    # Ego in middle lane
+    x, y, h, vx, vy = _make_curved_trajectory(
+        start_xy=(-80, 0.0), start_heading=0.0, speed=25.0,
+        num_timesteps=num_timesteps, dt=dt, rng=rng,
+    )
+    agents.append(AgentTrajectory(
+        agent_id=0, agent_type=AgentType.VEHICLE,
+        x=x, y=y, heading=h, vx=vx, vy=vy,
+        length=4.5, width=2.0, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    # Merging vehicle from ramp — cuts into ego's lane
+    merge_x, merge_y, merge_h, merge_vx, merge_vy = _make_curved_trajectory(
+        start_xy=(-70, 10), start_heading=-0.15, speed=22.0,
+        num_timesteps=num_timesteps, dt=dt, turn_rate=-0.005, rng=rng,
+    )
+    agents.append(AgentTrajectory(
+        agent_id=1, agent_type=AgentType.VEHICLE,
+        x=merge_x, y=merge_y, heading=merge_h, vx=merge_vx, vy=merge_vy,
+        length=4.8, width=2.1, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    # Slow truck in right lane
+    x, y, h, vx, vy = _make_curved_trajectory(
+        start_xy=(-50, 3.5), start_heading=0.0, speed=18.0,
+        num_timesteps=num_timesteps, dt=dt, rng=rng,
+    )
+    agents.append(AgentTrajectory(
+        agent_id=2, agent_type=AgentType.VEHICLE,
+        x=x, y=y, heading=h, vx=vx, vy=vy,
+        length=8.0, width=2.5, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    # Fast car in left lane
+    x, y, h, vx, vy = _make_curved_trajectory(
+        start_xy=(-90, -3.5), start_heading=0.0, speed=30.0,
+        num_timesteps=num_timesteps, dt=dt, rng=rng,
+    )
+    agents.append(AgentTrajectory(
+        agent_id=3, agent_type=AgentType.VEHICLE,
+        x=x, y=y, heading=h, vx=vx, vy=vy,
+        length=4.2, width=1.9, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    return Scenario(
+        scenario_id="demo_highway_merge",
+        num_timesteps=num_timesteps,
+        timestep_duration=dt,
+        agents=agents,
+        road_graph=road_graph,
+        ego_agent_id=0,
+    )
+
+
+def _build_pedestrian_crossing(
+    rng: np.random.Generator, num_timesteps: int, dt: float
+) -> Scenario:
+    """Pedestrian crossing with approaching vehicles."""
+    lanes = []
+    lane_id = 0
+
+    # Two-lane road
+    for y_off in [-1.75, 1.75]:
+        lanes.append(
+            _make_lane((-60, y_off), (60, y_off), lane_id=lane_id)
+        )
+        lane_id += 1
+
+    # Boundaries
+    for y_off in [-3.5, 0.0, 3.5]:
+        lanes.append(
+            _make_lane((-60, y_off), (60, y_off), lane_type="left_boundary", lane_id=lane_id)
+        )
+        lane_id += 1
+
+    road_edges = [
+        RoadEdge(points=np.array([[-60, -3.5], [60, -3.5]], dtype=np.float32)),
+        RoadEdge(points=np.array([[-60, 3.5], [60, 3.5]], dtype=np.float32)),
+    ]
+
+    crosswalks = [
+        Crosswalk(
+            polygon=np.array(
+                [[8, -5], [8, 5], [11, 5], [11, -5]], dtype=np.float32
+            )
+        ),
+    ]
+
+    road_graph = RoadGraph(
+        lanes=lanes, road_edges=road_edges, crosswalks=crosswalks,
+    )
+    agents: list[AgentTrajectory] = []
+
+    # Ego approaching the crosswalk
+    x, y, h, vx, vy = _make_curved_trajectory(
+        start_xy=(-40, -1.75), start_heading=0.0, speed=10.0,
+        num_timesteps=num_timesteps, dt=dt, accel=-1.0, rng=rng,
+    )
+    agents.append(AgentTrajectory(
+        agent_id=0, agent_type=AgentType.VEHICLE,
+        x=x, y=y, heading=h, vx=vx, vy=vy,
+        length=4.5, width=2.0, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    # Pedestrian 1: crossing south to north
+    x, y, h, vx, vy = _make_curved_trajectory(
+        start_xy=(9.5, -5), start_heading=np.pi / 2, speed=1.3,
+        num_timesteps=num_timesteps, dt=dt, noise_scale=0.02, rng=rng,
+    )
+    agents.append(AgentTrajectory(
+        agent_id=1, agent_type=AgentType.PEDESTRIAN,
+        x=x, y=y, heading=h, vx=vx, vy=vy,
+        length=0.5, width=0.5, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    # Pedestrian 2: crossing north to south, starts later
+    x, y, h, vx, vy = _make_curved_trajectory(
+        start_xy=(10.0, 4), start_heading=-np.pi / 2, speed=1.5,
+        num_timesteps=num_timesteps, dt=dt, noise_scale=0.02, rng=rng,
+    )
+    valid = np.ones(num_timesteps, dtype=bool)
+    valid[:15] = False
+    agents.append(AgentTrajectory(
+        agent_id=2, agent_type=AgentType.PEDESTRIAN,
+        x=x, y=y, heading=h, vx=vx, vy=vy,
+        length=0.5, width=0.5, valid=valid,
+    ))
+
+    # Oncoming vehicle
+    x, y, h, vx, vy = _make_curved_trajectory(
+        start_xy=(50, 1.75), start_heading=np.pi, speed=8.0,
+        num_timesteps=num_timesteps, dt=dt, accel=-0.5, rng=rng,
+    )
+    agents.append(AgentTrajectory(
+        agent_id=3, agent_type=AgentType.VEHICLE,
+        x=x, y=y, heading=h, vx=vx, vy=vy,
+        length=4.5, width=2.0, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    return Scenario(
+        scenario_id="demo_pedestrian_crossing",
+        num_timesteps=num_timesteps,
+        timestep_duration=dt,
+        agents=agents,
+        road_graph=road_graph,
+        ego_agent_id=0,
+    )
+
+
+def _make_signal_cycle(
+    num_timesteps: int, offset: int = 0
+) -> np.ndarray:
+    """Generate a traffic signal state cycle."""
+    states = np.full(num_timesteps, int(SignalState.GREEN), dtype=np.int32)
+    for t in range(num_timesteps):
+        cycle_pos = (t + offset) % 91
+        if cycle_pos < 40:
+            states[t] = int(SignalState.GREEN)
+        elif cycle_pos < 50:
+            states[t] = int(SignalState.YELLOW)
+        else:
+            states[t] = int(SignalState.RED)
+    return states
