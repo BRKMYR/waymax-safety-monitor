@@ -79,7 +79,13 @@ class AgentTrajectory:
 
 @dataclass
 class LaneLine:
-    """A lane center or boundary polyline."""
+    """A lane center or boundary polyline.
+
+    Contract: for ``lane_type == "center"``, the ordering of ``points``
+    encodes the legal travel direction (points[i] -> points[i+1]).
+    Metrics that compare an agent heading to lane direction rely on this
+    ordering (see ``src.metrics.safety.compute_wrong_way``).
+    """
 
     points: NDArray[np.float32]  # (N, 2) xy coordinates
     lane_type: str = "center"  # "center", "left_boundary", "right_boundary"

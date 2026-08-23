@@ -1,7 +1,9 @@
 """Generate synthetic demo scenarios for development without WOMD data.
 
 Creates realistic-looking multi-agent urban driving scenarios with
-intersections, lane structures, and diverse agent behaviors.
+intersections, lane structures, and diverse agent behaviors. Scenarios
+that rely on exact trigger timesteps for tests (``hard_brake``,
+``stalled_ego``) are noise-free and constructed analytically.
 """
 
 from __future__ import annotations
@@ -73,21 +75,41 @@ def _make_curved_trajectory(
 
 
 def _build_intersection_road_graph() -> RoadGraph:
-    """Build a 4-way intersection road graph."""
+    """Build a 4-way intersection road graph with direction-encoded lanes.
+
+    Lane-center point ordering encodes travel direction (see LaneLine
+    docstring). Eastbound lanes at y in {-3.5, -1.75} run west -> east;
+    westbound lanes at y in {1.75, 3.5} run east -> west. Similarly for
+    the north-south road.
+    """
     lanes = []
     lane_id = 0
 
-    # East-west lanes (main road)
-    for y_off in [-3.5, -1.75, 1.75, 3.5]:
+    # East-west road:
+    # y = -3.5 and y = -1.75 are eastbound  -> ordered west -> east.
+    for y_off in [-3.5, -1.75]:
         lanes.append(
             _make_lane((-80, y_off), (80, y_off), lane_type="center", lane_id=lane_id)
         )
         lane_id += 1
+    # y = +1.75 and y = +3.5 are westbound -> ordered east -> west.
+    for y_off in [1.75, 3.5]:
+        lanes.append(
+            _make_lane((80, y_off), (-80, y_off), lane_type="center", lane_id=lane_id)
+        )
+        lane_id += 1
 
-    # North-south lanes (cross street)
-    for x_off in [-3.5, -1.75, 1.75, 3.5]:
+    # North-south road:
+    # x = +1.75, +3.5 are northbound -> south -> north.
+    for x_off in [1.75, 3.5]:
         lanes.append(
             _make_lane((x_off, -80), (x_off, 80), lane_type="center", lane_id=lane_id)
+        )
+        lane_id += 1
+    # x = -3.5, -1.75 are southbound -> north -> south.
+    for x_off in [-3.5, -1.75]:
+        lanes.append(
+            _make_lane((x_off, 80), (x_off, -80), lane_type="center", lane_id=lane_id)
         )
         lane_id += 1
 
@@ -162,6 +184,60 @@ def _build_intersection_road_graph() -> RoadGraph:
     )
 
 
+def _build_two_lane_road_graph(
+    with_crosswalk: bool = False,
+) -> RoadGraph:
+    """Build a straight two-lane road: one eastbound at y = -1.75,
+    one westbound at y = +1.75. Used by hard_brake and stalled_ego.
+    """
+    lanes = []
+    lane_id = 0
+
+    # Eastbound center (west -> east)
+    lanes.append(_make_lane((-60, -1.75), (60, -1.75), lane_id=lane_id))
+    lane_id += 1
+    # Westbound center (east -> west)
+    lanes.append(_make_lane((60, 1.75), (-60, 1.75), lane_id=lane_id))
+    lane_id += 1
+
+    # Boundaries
+    for y_off in [-3.5, 0.0, 3.5]:
+        lanes.append(
+            _make_lane((-60, y_off), (60, y_off), lane_type="left_boundary", lane_id=lane_id)
+        )
+        lane_id += 1
+
+    road_edges = [
+        RoadEdge(points=np.array([[-60, -3.5], [60, -3.5]], dtype=np.float32)),
+        RoadEdge(points=np.array([[-60, 3.5], [60, 3.5]], dtype=np.float32)),
+    ]
+
+    crosswalks: list[Crosswalk] = []
+    if with_crosswalk:
+        crosswalks.append(
+            Crosswalk(
+                polygon=np.array(
+                    [[8, -5], [8, 5], [11, 5], [11, -5]], dtype=np.float32
+                )
+            )
+        )
+
+    return RoadGraph(
+        lanes=lanes,
+        road_edges=road_edges,
+        crosswalks=crosswalks,
+    )
+
+
+_BUNDLED_SCENARIOS = (
+    "intersection_conflict",
+    "highway_merge",
+    "pedestrian_crossing",
+    "hard_brake",
+    "stalled_ego",
+)
+
+
 def load_demo_scenario(
     scenario_name: str = "intersection_conflict",
     seed: int = 42,
@@ -169,9 +245,11 @@ def load_demo_scenario(
     """Load a pre-built demo scenario.
 
     Available scenarios:
-        - "intersection_conflict": Multi-agent intersection with near-miss
-        - "highway_merge": Highway merge with aggressive lane change
-        - "pedestrian_crossing": Pedestrian crossing with approaching vehicles
+        - "intersection_conflict": Multi-agent intersection with near-miss.
+        - "highway_merge":         Highway merge with aggressive lane change.
+        - "pedestrian_crossing":   Crosswalk with two pedestrians.
+        - "hard_brake":            Lead vehicle brakes at -6 m/s^2 at t=31 (noise-free).
+        - "stalled_ego":           Ego rolls to a stop; stalled trigger fires at t=68 (noise-free).
     """
     rng = np.random.default_rng(seed)
     num_timesteps = 91
@@ -181,8 +259,17 @@ def load_demo_scenario(
         return _build_highway_merge(rng, num_timesteps, dt)
     elif scenario_name == "pedestrian_crossing":
         return _build_pedestrian_crossing(rng, num_timesteps, dt)
-    else:
+    elif scenario_name == "hard_brake":
+        return _build_hard_brake(num_timesteps, dt)
+    elif scenario_name == "stalled_ego":
+        return _build_stalled_ego(num_timesteps, dt)
+    elif scenario_name == "intersection_conflict":
         return _build_intersection_conflict(rng, num_timesteps, dt)
+    else:
+        raise ValueError(
+            f"Unknown scenario '{scenario_name}'. "
+            f"Available: {', '.join(_BUNDLED_SCENARIOS)}"
+        )
 
 
 def _build_intersection_conflict(
@@ -299,11 +386,11 @@ def _build_intersection_conflict(
 def _build_highway_merge(
     rng: np.random.Generator, num_timesteps: int, dt: float
 ) -> Scenario:
-    """Highway merge scenario with aggressive lane change."""
+    """Highway merge scenario with aggressive lane change (one-way traffic)."""
     lanes = []
     lane_id = 0
 
-    # Three highway lanes
+    # Three highway lanes (all one-way eastbound; ordering west -> east)
     for y_off in [-3.5, 0.0, 3.5]:
         lanes.append(
             _make_lane((-100, y_off), (100, y_off), n_points=40, lane_id=lane_id)
@@ -393,12 +480,12 @@ def _build_pedestrian_crossing(
     lanes = []
     lane_id = 0
 
-    # Two-lane road
-    for y_off in [-1.75, 1.75]:
-        lanes.append(
-            _make_lane((-60, y_off), (60, y_off), lane_id=lane_id)
-        )
-        lane_id += 1
+    # Two-lane road with direction-encoded lanes.
+    # Eastbound at y = -1.75 (west -> east), westbound at y = +1.75 (east -> west).
+    lanes.append(_make_lane((-60, -1.75), (60, -1.75), lane_id=lane_id))
+    lane_id += 1
+    lanes.append(_make_lane((60, 1.75), (-60, 1.75), lane_id=lane_id))
+    lane_id += 1
 
     # Boundaries
     for y_off in [-3.5, 0.0, 3.5]:
@@ -436,9 +523,9 @@ def _build_pedestrian_crossing(
         length=4.5, width=2.0, valid=np.ones(num_timesteps, dtype=bool),
     ))
 
-    # Pedestrian 1: crossing south to north
+    # Pedestrian 1: crossing south to north, paced to be at ego lane when ego arrives
     x, y, h, vx, vy = _make_curved_trajectory(
-        start_xy=(9.5, -5), start_heading=np.pi / 2, speed=1.3,
+        start_xy=(9.5, -5), start_heading=np.pi / 2, speed=0.4,
         num_timesteps=num_timesteps, dt=dt, noise_scale=0.02, rng=rng,
     )
     agents.append(AgentTrajectory(
@@ -473,6 +560,148 @@ def _build_pedestrian_crossing(
 
     return Scenario(
         scenario_id="demo_pedestrian_crossing",
+        num_timesteps=num_timesteps,
+        timestep_duration=dt,
+        agents=agents,
+        road_graph=road_graph,
+        ego_agent_id=0,
+    )
+
+
+def _build_hard_brake(num_timesteps: int, dt: float) -> Scenario:
+    """Noise-free scenario: lead vehicle brakes hard at t=31.
+
+    Lead vehicle (agent 1) speed profile (m/s):
+        v[t] = 15.0                                for t <= 30
+        v[t] = max(0.0, 15.0 - 6.0 * (t - 30) * dt) for t > 30
+
+    Acceleration at t=31: (14.4 - 15.0) / 0.1 = -6.0 m/s^2 => hard_brake RED.
+    Ego (agent 0) cruises at 15 m/s and closes on the stopping lead, driving
+    its TTC below the RED threshold in t in [40, 75].
+    """
+    road_graph = _build_two_lane_road_graph(with_crosswalk=False)
+    agents: list[AgentTrajectory] = []
+
+    # Lead vehicle (agent 1)
+    v_lead = np.empty(num_timesteps, dtype=np.float32)
+    for t in range(num_timesteps):
+        if t <= 30:
+            v_lead[t] = 15.0
+        else:
+            v_lead[t] = max(0.0, 15.0 - 6.0 * (t - 30) * dt)
+
+    x_lead = np.empty(num_timesteps, dtype=np.float32)
+    x_lead[0] = 10.0
+    for t in range(1, num_timesteps):
+        x_lead[t] = x_lead[t - 1] + v_lead[t] * dt
+    y_lead = np.full(num_timesteps, -1.75, dtype=np.float32)
+    h_lead = np.zeros(num_timesteps, dtype=np.float32)
+    vx_lead = v_lead.copy()
+    vy_lead = np.zeros(num_timesteps, dtype=np.float32)
+
+    # Ego (agent 0): constant 15 m/s eastbound, starts behind lead
+    v_ego = np.full(num_timesteps, 15.0, dtype=np.float32)
+    x_ego = np.empty(num_timesteps, dtype=np.float32)
+    x_ego[0] = -25.0
+    for t in range(1, num_timesteps):
+        x_ego[t] = x_ego[t - 1] + v_ego[t] * dt
+    y_ego = np.full(num_timesteps, -1.75, dtype=np.float32)
+    h_ego = np.zeros(num_timesteps, dtype=np.float32)
+
+    agents.append(AgentTrajectory(
+        agent_id=0, agent_type=AgentType.VEHICLE,
+        x=x_ego, y=y_ego, heading=h_ego,
+        vx=v_ego, vy=np.zeros(num_timesteps, dtype=np.float32),
+        length=4.5, width=2.0, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    agents.append(AgentTrajectory(
+        agent_id=1, agent_type=AgentType.VEHICLE,
+        x=x_lead, y=y_lead, heading=h_lead, vx=vx_lead, vy=vy_lead,
+        length=4.5, width=2.0, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    # Background oncoming vehicle in westbound lane for visual life.
+    v_onc = 10.0
+    x_onc = np.empty(num_timesteps, dtype=np.float32)
+    x_onc[0] = 40.0
+    for t in range(1, num_timesteps):
+        x_onc[t] = x_onc[t - 1] - v_onc * dt
+    y_onc = np.full(num_timesteps, 1.75, dtype=np.float32)
+    h_onc = np.full(num_timesteps, np.pi, dtype=np.float32)
+    vx_onc = np.full(num_timesteps, -v_onc, dtype=np.float32)
+    vy_onc = np.zeros(num_timesteps, dtype=np.float32)
+
+    agents.append(AgentTrajectory(
+        agent_id=2, agent_type=AgentType.VEHICLE,
+        x=x_onc, y=y_onc, heading=h_onc, vx=vx_onc, vy=vy_onc,
+        length=4.5, width=2.0, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    return Scenario(
+        scenario_id="demo_hard_brake",
+        num_timesteps=num_timesteps,
+        timestep_duration=dt,
+        agents=agents,
+        road_graph=road_graph,
+        ego_agent_id=0,
+    )
+
+
+def _build_stalled_ego(num_timesteps: int, dt: float) -> Scenario:
+    """Noise-free scenario: ego rolls to a stop; stalled trigger fires at t=68.
+
+    Ego (agent 0) speed profile:
+        v[t] = 8.0                                    for t < 10
+        v[t] = max(0.0, 8.0 - 2.0 * (t - 10) * dt)    for t >= 10
+
+    First t with v < 0.3 is t=49 (v = 0.2). With stall_dwell_steps = 20 the
+    dwell counter reaches 20 at t=68 (49 + 19 = 68), where the stalled RED
+    trigger fires.
+    """
+    road_graph = _build_two_lane_road_graph(with_crosswalk=False)
+    agents: list[AgentTrajectory] = []
+
+    v_ego = np.empty(num_timesteps, dtype=np.float32)
+    for t in range(num_timesteps):
+        if t < 10:
+            v_ego[t] = 8.0
+        else:
+            v_ego[t] = max(0.0, 8.0 - 2.0 * (t - 10) * dt)
+
+    x_ego = np.empty(num_timesteps, dtype=np.float32)
+    x_ego[0] = -20.0
+    for t in range(1, num_timesteps):
+        x_ego[t] = x_ego[t - 1] + v_ego[t] * dt
+    y_ego = np.full(num_timesteps, -1.75, dtype=np.float32)
+    h_ego = np.zeros(num_timesteps, dtype=np.float32)
+    vy_ego = np.zeros(num_timesteps, dtype=np.float32)
+
+    agents.append(AgentTrajectory(
+        agent_id=0, agent_type=AgentType.VEHICLE,
+        x=x_ego, y=y_ego, heading=h_ego, vx=v_ego, vy=vy_ego,
+        length=4.5, width=2.0, valid=np.ones(num_timesteps, dtype=bool),
+    ))
+
+    # Two other vehicles flow past in the westbound (adjacent) lane.
+    for idx, (start_x, speed) in enumerate([(40.0, 8.0), (60.0, 10.0)], start=1):
+        v = np.full(num_timesteps, speed, dtype=np.float32)
+        x = np.empty(num_timesteps, dtype=np.float32)
+        x[0] = start_x
+        for t in range(1, num_timesteps):
+            x[t] = x[t - 1] - speed * dt
+        y = np.full(num_timesteps, 1.75, dtype=np.float32)
+        h = np.full(num_timesteps, np.pi, dtype=np.float32)
+        vx = np.full(num_timesteps, -speed, dtype=np.float32)
+        vy = np.zeros(num_timesteps, dtype=np.float32)
+        agents.append(AgentTrajectory(
+            agent_id=idx, agent_type=AgentType.VEHICLE,
+            x=x, y=y, heading=h, vx=vx, vy=vy,
+            length=4.5, width=2.0, valid=np.ones(num_timesteps, dtype=bool),
+        ))
+
+    return Scenario(
+        scenario_id="demo_stalled_ego",
         num_timesteps=num_timesteps,
         timestep_duration=dt,
         agents=agents,

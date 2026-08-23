@@ -1,6 +1,7 @@
 """Tests for scenario data classes and demo data loading."""
 
 import numpy as np
+import pytest
 
 from src.data.demo_loader import load_demo_scenario
 from src.data.scenario import AgentType, Scenario
@@ -107,3 +108,55 @@ class TestDemoLoader:
             assert agent.num_timesteps == scenario.num_timesteps
             assert len(agent.x) == scenario.num_timesteps
             assert len(agent.valid) == scenario.num_timesteps
+
+    def test_load_hard_brake(self):
+        scenario = load_demo_scenario("hard_brake")
+        assert scenario.num_timesteps == 91
+        assert scenario.timestep_duration == 0.1
+        assert len(scenario.agents) >= 2
+
+    def test_load_stalled_ego(self):
+        scenario = load_demo_scenario("stalled_ego")
+        assert scenario.num_timesteps == 91
+        assert scenario.timestep_duration == 0.1
+        assert any(
+            a.agent_type == AgentType.VEHICLE for a in scenario.agents
+        )
+
+    def test_hard_brake_deterministic_regardless_of_seed(self):
+        # Noise-free scenario -> byte-identical trajectory across seeds.
+        s1 = load_demo_scenario("hard_brake", seed=42)
+        s2 = load_demo_scenario("hard_brake", seed=99)
+        for a1, a2 in zip(s1.agents, s2.agents):
+            np.testing.assert_array_equal(a1.x, a2.x)
+            np.testing.assert_array_equal(a1.y, a2.y)
+            np.testing.assert_array_equal(a1.vx, a2.vx)
+
+    def test_stalled_ego_deterministic_regardless_of_seed(self):
+        s1 = load_demo_scenario("stalled_ego", seed=42)
+        s2 = load_demo_scenario("stalled_ego", seed=99)
+        for a1, a2 in zip(s1.agents, s2.agents):
+            np.testing.assert_array_equal(a1.x, a2.x)
+            np.testing.assert_array_equal(a1.y, a2.y)
+            np.testing.assert_array_equal(a1.vx, a2.vx)
+
+    def test_hard_brake_lead_speed_profile(self):
+        scenario = load_demo_scenario("hard_brake")
+        lead = scenario.agents[1]
+        # v[30] = 15.0, v[31] = 14.4 -> accel[31] = -6.0 m/s^2
+        assert abs(float(lead.vx[30]) - 15.0) < 1e-4
+        assert abs(float(lead.vx[31]) - 14.4) < 1e-4
+
+    def test_stalled_ego_speed_profile(self):
+        scenario = load_demo_scenario("stalled_ego")
+        ego = scenario.agents[0]
+        # First timestep with speed < 0.3 must be t=49 (v=0.2).
+        speeds = np.hypot(ego.vx, ego.vy)
+        # 0.3 boundary
+        below = np.where(speeds < 0.3)[0]
+        assert below.size > 0
+        assert int(below[0]) == 49
+
+    def test_unknown_scenario_raises(self):
+        with pytest.raises(ValueError):
+            load_demo_scenario("does_not_exist")
