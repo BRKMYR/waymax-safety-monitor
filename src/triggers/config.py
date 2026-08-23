@@ -38,6 +38,22 @@ class TriggerConfig:
     composite_red: float = 0.6
     composite_amber: float = 0.3
 
+    # Hard-brake threshold (longitudinal accel, m/s^2). Accel <= this fires RED.
+    hard_brake_accel: float = -4.0
+
+    # Stalled thresholds
+    stall_speed: float = 0.3          # m/s
+    stall_dwell_steps: int = 20       # timesteps of continuous sub-stall_speed
+
+    # VRU (pedestrian / cyclist) proximity thresholds (meters)
+    vru_distance_red: float = 3.0
+    vru_distance_amber: float = 6.0
+    vru_min_vehicle_speed: float = 1.0  # only evaluate for vehicles moving at least this fast
+
+    # Edge-triggered re-arm: consecutive clear timesteps required before the
+    # same (agent, kind) may re-fire.
+    rearm_clear_steps: int = 10
+
     @classmethod
     def conservative(cls) -> TriggerConfig:
         """Conservative policy: trigger early, safer."""
@@ -54,6 +70,13 @@ class TriggerConfig:
             lane_compliance_amber=0.6,
             composite_red=0.4,
             composite_amber=0.2,
+            hard_brake_accel=-3.0,
+            stall_speed=0.5,
+            stall_dwell_steps=15,
+            vru_distance_red=4.0,
+            vru_distance_amber=8.0,
+            vru_min_vehicle_speed=0.5,
+            rearm_clear_steps=5,
         )
 
     @classmethod
@@ -72,4 +95,11 @@ class TriggerConfig:
             lane_compliance_amber=0.35,
             composite_red=0.7,
             composite_amber=0.4,
+            hard_brake_accel=-6.0,
+            stall_speed=0.2,
+            stall_dwell_steps=30,
+            vru_distance_red=2.0,
+            vru_distance_amber=4.0,
+            vru_min_vehicle_speed=2.0,
+            rearm_clear_steps=8,
         )
