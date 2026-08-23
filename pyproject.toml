@@ -5,15 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "waymax-safety-monitor"
 version = "0.1.0"
-description = "Real-time safety monitoring dashboard for autonomous fleets — teleoperation trigger detection built on Waymax and Waymo Open Motion Dataset"
+description = "Real-time safety monitoring dashboard for autonomous fleets: teleoperation trigger detection built on Waymax and the Waymo Open Motion Dataset"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "BRKMYR" }]
 
 dependencies = [
-    "numpy>=1.24",
-    "pygame-ce>=2.4",
+    "numpy>=1.26,<3",
+    "pygame-ce>=2.5,<3",
 ]
 
 [project.optional-dependencies]
@@ -23,8 +23,8 @@ waymax = [
     "tensorflow>=2.14",
 ]
 dev = [
-    "pytest>=7.0",
-    "pytest-cov>=4.0",
+    "pytest>=8,<9",
+    "pytest-cov>=4",
 ]
 
 [project.scripts]
