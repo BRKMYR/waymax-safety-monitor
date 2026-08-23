@@ -15,6 +15,32 @@ if TYPE_CHECKING:
     pass
 
 
+# Playback-bar geometry constants. Exported so app.py and the renderer
+# agree on where the scrubber lives.
+_PLAYBACK_BAR_LEFT_INSET = 42        # start after play button
+_PLAYBACK_BAR_RIGHT_INSET = 200      # reserve for time + speed labels
+_PLAYBACK_BAR_HEIGHT = 6
+
+
+def playback_bar_rect(rect: pygame.Rect) -> pygame.Rect:
+    """Compute the scrubber rect within the playback bar.
+
+    Both the panel renderer and the app's scrub-hit-test use this so the
+    two agree pixel-for-pixel on where the bar lives.
+    """
+    bar_x = rect.x + _PLAYBACK_BAR_LEFT_INSET
+    bar_w = max(0, rect.width - _PLAYBACK_BAR_RIGHT_INSET - _PLAYBACK_BAR_LEFT_INSET)
+    return pygame.Rect(bar_x, rect.centery - _PLAYBACK_BAR_HEIGHT // 2, bar_w, _PLAYBACK_BAR_HEIGHT)
+
+
+def _safe_sysfont(name: str, size: int, bold: bool = False) -> pygame.font.Font:
+    """SysFont with a Font(None, ...) fallback for minimal environments."""
+    try:
+        return pygame.font.SysFont(name, size, bold=bold)
+    except Exception:
+        return pygame.font.Font(None, size)
+
+
 class PanelRenderer:
     """Renders dashboard side panels."""
 
@@ -27,19 +53,19 @@ class PanelRenderer:
     @property
     def font_title(self) -> pygame.font.Font:
         if self._font_title is None:
-            self._font_title = pygame.font.SysFont("monospace", 14, bold=True)
+            self._font_title = _safe_sysfont("monospace", 14, bold=True)
         return self._font_title
 
     @property
     def font_body(self) -> pygame.font.Font:
         if self._font_body is None:
-            self._font_body = pygame.font.SysFont("monospace", 11)
+            self._font_body = _safe_sysfont("monospace", 11)
         return self._font_body
 
     @property
     def font_small(self) -> pygame.font.Font:
         if self._font_small is None:
-            self._font_small = pygame.font.SysFont("monospace", 10)
+            self._font_small = _safe_sysfont("monospace", 10)
         return self._font_small
 
     def draw_trigger_panel(
@@ -61,7 +87,6 @@ class PanelRenderer:
 
         # Count badge
         red_count = sum(1 for e in events if e.severity == TriggerSeverity.RED)
-        amber_count = sum(1 for e in events if e.severity == TriggerSeverity.AMBER)
         if red_count > 0:
             badge = self.font_small.render(f" {red_count} ", True, (255, 255, 255))
             badge_rect = badge.get_rect(right=rect.right - 8, centery=rect.y + 14)
@@ -118,8 +143,14 @@ class PanelRenderer:
         current_timestep: int,
         total_timesteps: int,
         scroll_offset: int = 0,
+        timestep_duration: float = 0.1,
     ) -> None:
-        """Draw the incident timeline panel."""
+        """Draw the incident timeline panel.
+
+        ``timestep_duration`` is the scenario dt in seconds (used for the
+        time labels); defaults to 0.1 so existing 10 Hz scenarios keep
+        working without callers threading it in.
+        """
         pygame.draw.rect(self.surface, Colors.BG_PANEL, rect)
         pygame.draw.rect(self.surface, Colors.DIVIDER, rect, 1)
 
@@ -157,13 +188,13 @@ class PanelRenderer:
         t_start = self.font_small.render("0.0s", True, Colors.TEXT_MUTED)
         self.surface.blit(t_start, (bar_rect.x, bar_y + 18))
         t_current = self.font_small.render(
-            f"{current_timestep * 0.1:.1f}s", True, Colors.TEXT_PRIMARY
+            f"{current_timestep * timestep_duration:.1f}s", True, Colors.TEXT_PRIMARY
         )
         self.surface.blit(
             t_current, (bar_rect.centerx - t_current.get_width() // 2, bar_y + 18)
         )
         t_end = self.font_small.render(
-            f"{(total_timesteps - 1) * 0.1:.1f}s", True, Colors.TEXT_MUTED
+            f"{(total_timesteps - 1) * timestep_duration:.1f}s", True, Colors.TEXT_MUTED
         )
         self.surface.blit(t_end, (bar_rect.right - t_end.get_width(), bar_y + 18))
 
@@ -342,6 +373,7 @@ class PanelRenderer:
         total_timesteps: int,
         playing: bool,
         speed: float = 1.0,
+        timestep_duration: float = 0.1,
     ) -> None:
         """Draw the playback control bar at the bottom."""
         pygame.draw.rect(self.surface, Colors.BG_PANEL, rect)
@@ -365,33 +397,31 @@ class PanelRenderer:
             )
 
         # Progress bar
-        bar_x = btn_x + 30
-        bar_w = rect.width - 200
-        bar_rect = pygame.Rect(bar_x, rect.centery - 3, bar_w, 6)
-        pygame.draw.rect(self.surface, Colors.PLAYBACK_BAR, bar_rect, border_radius=3)
+        bar = playback_bar_rect(rect)
+        pygame.draw.rect(self.surface, Colors.PLAYBACK_BAR, bar, border_radius=3)
 
-        if total_timesteps > 0:
+        if total_timesteps > 0 and bar.width > 0:
             progress = current_timestep / max(1, total_timesteps - 1)
-            fill_w = int(bar_w * progress)
-            fill_rect = pygame.Rect(bar_x, rect.centery - 3, fill_w, 6)
+            fill_w = int(bar.width * progress)
+            fill_rect = pygame.Rect(bar.x, bar.y, fill_w, bar.height)
             pygame.draw.rect(
                 self.surface, Colors.PLAYBACK_PROGRESS, fill_rect, border_radius=3,
             )
             # Scrubber handle
-            handle_x = bar_x + fill_w
+            handle_x = bar.x + fill_w
             pygame.draw.circle(
                 self.surface, Colors.TEXT_PRIMARY, (handle_x, rect.centery), 6,
             )
 
         # Time display
-        time_s = current_timestep * 0.1
-        total_s = (total_timesteps - 1) * 0.1
+        time_s = current_timestep * timestep_duration
+        total_s = (total_timesteps - 1) * timestep_duration
         time_text = self.font_body.render(
             f"{time_s:.1f}s / {total_s:.1f}s", True, Colors.TEXT_PRIMARY
         )
         self.surface.blit(
             time_text,
-            (bar_x + bar_w + 12, rect.centery - time_text.get_height() // 2),
+            (bar.right + 12, rect.centery - time_text.get_height() // 2),
         )
 
         # Speed indicator
@@ -403,10 +433,10 @@ class PanelRenderer:
 
         # Keyboard hints
         hints = self.font_small.render(
-            "SPACE:play  ←→:step  +/-:speed  F:fit  R:reset  1/2/3:scenario",
+            "SPACE:play  ARROWS:step  +/-:speed  F:fit  R:reset  1-5:scenario",
             True, Colors.TEXT_MUTED,
         )
-        self.surface.blit(hints, (bar_x, rect.y + 3))
+        self.surface.blit(hints, (bar.x, rect.y + 3))
 
     def _agent_label(self, agent_id: int, agent_type: AgentType) -> str:
         if agent_type == AgentType.PEDESTRIAN:

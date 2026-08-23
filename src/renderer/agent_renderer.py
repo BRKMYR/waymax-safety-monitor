@@ -15,12 +15,22 @@ if TYPE_CHECKING:
     from src.renderer.map_renderer import Viewport
 
 
+def _safe_sysfont(name: str, size: int, bold: bool = False) -> pygame.font.Font:
+    """SysFont with a Font(None, ...) fallback for minimal environments."""
+    try:
+        return pygame.font.SysFont(name, size, bold=bold)
+    except Exception:
+        return pygame.font.Font(None, size)
+
+
 class AgentRenderer:
     """Renders agents as oriented bounding boxes with heading indicators and risk halos."""
 
     def __init__(self, surface: pygame.Surface, viewport: "Viewport"):
         self.surface = surface
         self.viewport = viewport
+        # Cached label font (avoid re-creating per label per frame).
+        self._label_font = _safe_sysfont("monospace", 10)
 
     def draw_agent(
         self,
@@ -150,25 +160,45 @@ class AgentRenderer:
         trail_length: int,
         is_ego: bool,
     ) -> None:
-        """Draw trajectory trail behind the agent."""
+        """Draw trajectory trail behind the agent.
+
+        Renders all segments onto a single small alpha surface bounding
+        the trail points, then blits it once (avoids a full-screen alpha
+        allocation per segment).
+        """
         start_t = max(0, current_t - trail_length)
-        points = []
+        points: list[tuple[int, int]] = []
 
         for t in range(start_t, current_t + 1):
             if t < agent.num_timesteps and agent.valid[t]:
                 pt = self.viewport.world_to_screen(
                     np.array([float(agent.x[t]), float(agent.y[t])], dtype=np.float32)
                 )
-                points.append(pt)
+                points.append((int(pt[0]), int(pt[1])))
 
-        if len(points) >= 2:
-            color = Colors.EGO_VEHICLE if is_ego else Colors.TEXT_MUTED
-            # Draw trail with fading opacity
-            for i in range(len(points) - 1):
-                alpha = int(60 * (i + 1) / len(points))
-                temp = pygame.Surface(self.surface.get_size(), pygame.SRCALPHA)
-                pygame.draw.line(temp, (*color, alpha), points[i], points[i + 1], 1)
-                self.surface.blit(temp, (0, 0))
+        if len(points) < 2:
+            return
+
+        base_color = Colors.EGO_VEHICLE if is_ego else Colors.TEXT_MUTED
+
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        pad = 2
+        min_x = min(xs) - pad
+        min_y = min(ys) - pad
+        max_x = max(xs) + pad
+        max_y = max(ys) + pad
+        w = max(1, max_x - min_x)
+        h = max(1, max_y - min_y)
+
+        temp = pygame.Surface((w, h), pygame.SRCALPHA)
+        local = [(p[0] - min_x, p[1] - min_y) for p in points]
+
+        n = len(local)
+        for i in range(n - 1):
+            alpha = int(60 * (i + 1) / n)
+            pygame.draw.line(temp, (*base_color, alpha), local[i], local[i + 1], 1)
+        self.surface.blit(temp, (min_x, min_y))
 
     def _draw_label(
         self,
@@ -181,14 +211,13 @@ class AgentRenderer:
             np.array([state.x, state.y], dtype=np.float32)
         )
 
-        font = pygame.font.SysFont("monospace", 10)
         label = "EGO" if is_ego else f"V{agent.agent_id}"
         if agent.agent_type == AgentType.PEDESTRIAN:
             label = f"P{agent.agent_id}"
         elif agent.agent_type == AgentType.CYCLIST:
             label = f"C{agent.agent_id}"
 
-        text = font.render(label, True, Colors.TEXT_PRIMARY)
+        text = self._label_font.render(label, True, Colors.TEXT_PRIMARY)
         text_rect = text.get_rect(center=(center[0], center[1] - 15))
         self.surface.blit(text, text_rect)
 
