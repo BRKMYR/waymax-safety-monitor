@@ -1,7 +1,16 @@
 """Safety metrics for driving scenarios.
 
 Computes per-agent, per-timestep safety metrics including overlap detection,
-off-road detection, wrong-way detection, time-to-collision, and lane compliance.
+off-road detection, wrong-way detection, time-to-collision, lane compliance,
+longitudinal acceleration, and VRU (vulnerable road user) proximity.
+
+Applicability rules:
+- overlap and ttc apply to all agent types.
+- offroad, wrong_way, and lane_compliance are only meaningful for
+  road-following agents (vehicles and cyclists). Pedestrians are skipped
+  and return neutral values (0.0 for offroad/wrong_way, 1.0 for compliance).
+- accel and vru_distance are helpers for the trigger engine; accel is
+  computed for every valid agent, vru_distance is computed for vehicles.
 """
 
 from __future__ import annotations
@@ -9,7 +18,11 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from src.data.scenario import AgentState, AgentTrajectory, RoadGraph, Scenario
+from src.data.scenario import AgentState, AgentType, Scenario
+
+
+# Radius (m) used to gather lane-center segments for direction-aware matching.
+_LANE_MATCH_RADIUS = 6.0
 
 
 def compute_overlap(scenario: Scenario, t: int) -> dict[int, float]:
@@ -42,7 +55,8 @@ def compute_offroad(
     """Check if agents are off the drivable surface at timestep t.
 
     Returns dict mapping agent_id -> off-road score (0.0 = on road, 1.0 = off road).
-    Uses distance to nearest road edge/lane as a proxy.
+    Uses distance to nearest lane center as a proxy. Pedestrians are excluded
+    (returned as 0.0) because they are not constrained to the drivable surface.
     """
     active = scenario.agents_at(t)
     road_graph = scenario.road_graph
@@ -60,6 +74,10 @@ def compute_offroad(
     all_lane_points = np.concatenate(lane_points, axis=0)
 
     for agent, state in active:
+        if agent.agent_type == AgentType.PEDESTRIAN:
+            offroad[agent.agent_id] = 0.0
+            continue
+
         pos = np.array([state.x, state.y], dtype=np.float32)
         dists = np.linalg.norm(all_lane_points - pos, axis=1)
         min_dist = float(np.min(dists))
@@ -83,44 +101,67 @@ def compute_wrong_way(
     """Check if agents are heading in the wrong direction relative to lane.
 
     Returns dict mapping agent_id -> wrong-way score (0.0 = aligned, 1.0 = opposite).
+
+    Uses direction-aware lane matching: for each agent, the nearby lane-center
+    segment (within ``_LANE_MATCH_RADIUS`` meters of the agent position) whose
+    direction best aligns with the agent's heading is selected, and the score
+    is the absolute angular difference between the agent heading and that
+    segment's direction, normalized by pi.
+
+    Pedestrians are excluded (returned as 0.0) since lane direction does not
+    apply to them.
     """
     active = scenario.agents_at(t)
     road_graph = scenario.road_graph
     wrong_way: dict[int, float] = {}
 
     # Compute lane directions from center lane polylines
-    lane_segments = []
+    lane_mids: list[NDArray[np.float32]] = []
+    lane_dirs: list[float] = []
     for lane in road_graph.lanes:
         if lane.lane_type == "center" and len(lane.points) >= 2:
             for k in range(len(lane.points) - 1):
                 p1 = lane.points[k]
                 p2 = lane.points[k + 1]
                 mid = (p1 + p2) / 2
-                direction = np.arctan2(p2[1] - p1[1], p2[0] - p1[0])
-                lane_segments.append((mid, direction))
+                direction = float(np.arctan2(p2[1] - p1[1], p2[0] - p1[0]))
+                lane_mids.append(mid)
+                lane_dirs.append(direction)
 
-    if not lane_segments:
+    if not lane_mids:
         return {agent.agent_id: 0.0 for agent, _ in active}
 
-    seg_mids = np.array([s[0] for s in lane_segments], dtype=np.float32)
-    seg_dirs = np.array([s[1] for s in lane_segments], dtype=np.float32)
+    seg_mids = np.array(lane_mids, dtype=np.float32)
+    seg_dirs = np.array(lane_dirs, dtype=np.float32)
 
     for agent, state in active:
-        pos = np.array([state.x, state.y], dtype=np.float32)
-        dists = np.linalg.norm(seg_mids - pos, axis=1)
-        nearest_idx = int(np.argmin(dists))
-
-        # Only check wrong-way if reasonably close to a lane
-        if dists[nearest_idx] > 5.0:
+        if agent.agent_type == AgentType.PEDESTRIAN:
             wrong_way[agent.agent_id] = 0.0
             continue
 
-        lane_dir = seg_dirs[nearest_idx]
-        heading_diff = _angle_diff(state.heading, lane_dir)
+        pos = np.array([state.x, state.y], dtype=np.float32)
+        dists = np.linalg.norm(seg_mids - pos, axis=1)
 
-        # Score based on how far heading deviates from lane direction
-        # 0 = aligned, pi = opposite direction
-        wrong_way[agent.agent_id] = float(abs(heading_diff) / np.pi)
+        near_mask = dists <= _LANE_MATCH_RADIUS
+
+        if not near_mask.any():
+            # No nearby lane at all: use nearest single segment (fallback).
+            nearest_idx = int(np.argmin(dists))
+            if dists[nearest_idx] > 5.0:
+                # Genuinely off the map — treat as no info.
+                wrong_way[agent.agent_id] = 0.0
+                continue
+            best_diff = abs(_angle_diff(state.heading, float(seg_dirs[nearest_idx])))
+        else:
+            near_dirs = seg_dirs[near_mask]
+            # Pick the nearby segment minimizing |angle diff|.
+            diffs = np.array(
+                [abs(_angle_diff(state.heading, float(d))) for d in near_dirs],
+                dtype=np.float32,
+            )
+            best_diff = float(np.min(diffs))
+
+        wrong_way[agent.agent_id] = float(best_diff / np.pi)
 
     return wrong_way
 
@@ -155,39 +196,58 @@ def compute_lane_compliance(
     """Compute lane compliance score for each agent at timestep t.
 
     Returns dict mapping agent_id -> compliance score (1.0 = perfect, 0.0 = poor).
-    Combines lateral offset from lane center and heading alignment.
+    Combines lateral offset from the best-matched (direction-aware) lane center
+    with heading alignment against that lane. Pedestrians are excluded (returned
+    as 1.0) since lane compliance does not apply to them.
     """
     active = scenario.agents_at(t)
     road_graph = scenario.road_graph
     compliance: dict[int, float] = {}
 
     # Get lane centers
-    lane_centers = []
-    lane_directions = []
+    lane_mids: list[NDArray[np.float32]] = []
+    lane_dirs: list[float] = []
     for lane in road_graph.lanes:
         if lane.lane_type == "center" and len(lane.points) >= 2:
             for k in range(len(lane.points) - 1):
                 mid = (lane.points[k] + lane.points[k + 1]) / 2
-                direction = np.arctan2(
+                direction = float(np.arctan2(
                     lane.points[k + 1][1] - lane.points[k][1],
                     lane.points[k + 1][0] - lane.points[k][0],
-                )
-                lane_centers.append(mid)
-                lane_directions.append(direction)
+                ))
+                lane_mids.append(mid)
+                lane_dirs.append(direction)
 
-    if not lane_centers:
+    if not lane_mids:
         return {agent.agent_id: 1.0 for agent, _ in active}
 
-    centers = np.array(lane_centers, dtype=np.float32)
-    directions = np.array(lane_directions, dtype=np.float32)
+    centers = np.array(lane_mids, dtype=np.float32)
+    directions = np.array(lane_dirs, dtype=np.float32)
 
     for agent, state in active:
+        if agent.agent_type == AgentType.PEDESTRIAN:
+            compliance[agent.agent_id] = 1.0
+            continue
+
         pos = np.array([state.x, state.y], dtype=np.float32)
         dists = np.linalg.norm(centers - pos, axis=1)
-        nearest_idx = int(np.argmin(dists))
 
-        lateral_offset = float(dists[nearest_idx])
-        heading_diff = abs(_angle_diff(state.heading, directions[nearest_idx]))
+        near_mask = dists <= _LANE_MATCH_RADIUS
+        if near_mask.any():
+            near_idx = np.nonzero(near_mask)[0]
+            # Pick the nearby segment minimizing heading diff (direction-aware).
+            near_dirs = directions[near_idx]
+            diffs = np.array(
+                [abs(_angle_diff(state.heading, float(d))) for d in near_dirs],
+                dtype=np.float32,
+            )
+            best_local = int(np.argmin(diffs))
+            chosen_idx = int(near_idx[best_local])
+        else:
+            chosen_idx = int(np.argmin(dists))
+
+        lateral_offset = float(dists[chosen_idx])
+        heading_diff = abs(_angle_diff(state.heading, float(directions[chosen_idx])))
 
         # Lateral score: 1.0 within 0.5m, decays to 0.0 at 3.0m
         lateral_score = max(0.0, 1.0 - max(0.0, lateral_offset - 0.5) / 2.5)
@@ -198,6 +258,66 @@ def compute_lane_compliance(
         compliance[agent.agent_id] = 0.6 * lateral_score + 0.4 * heading_score
 
     return compliance
+
+
+def compute_accel(scenario: Scenario, t: int) -> dict[int, float]:
+    """Compute longitudinal acceleration for each valid agent at timestep t.
+
+    Uses ``(speed[t] - speed[t-1]) / dt`` per agent. At t == 0 the value is
+    ``0.0``. If the agent was not valid at t-1 the value is also ``0.0``.
+
+    Returns dict mapping agent_id -> acceleration in m/s^2 (negative = braking).
+    """
+    active = scenario.agents_at(t)
+    dt = scenario.timestep_duration
+    result: dict[int, float] = {}
+
+    for agent, _state in active:
+        if t <= 0:
+            result[agent.agent_id] = 0.0
+            continue
+        if t - 1 >= agent.num_timesteps or not bool(agent.valid[t - 1]):
+            result[agent.agent_id] = 0.0
+            continue
+        v_now = float(np.hypot(agent.vx[t], agent.vy[t]))
+        v_prev = float(np.hypot(agent.vx[t - 1], agent.vy[t - 1]))
+        result[agent.agent_id] = (v_now - v_prev) / dt
+
+    return result
+
+
+def compute_vru_distance(scenario: Scenario, t: int) -> dict[int, float]:
+    """Compute distance from each vehicle to the nearest VRU at timestep t.
+
+    VRUs are pedestrians and cyclists. Returns a dict keyed by *vehicle*
+    agent_id -> minimum center-to-center distance in meters (``inf`` if no
+    VRUs are active at this timestep). Pedestrian / cyclist agent_ids are
+    intentionally not present in the result.
+    """
+    active = scenario.agents_at(t)
+
+    vrus: list[tuple[float, float]] = []
+    vehicles: list[tuple[int, float, float]] = []
+
+    for agent, state in active:
+        if agent.agent_type in (AgentType.PEDESTRIAN, AgentType.CYCLIST):
+            vrus.append((state.x, state.y))
+        if agent.agent_type == AgentType.VEHICLE:
+            vehicles.append((agent.agent_id, state.x, state.y))
+
+    result: dict[int, float] = {}
+    if not vrus:
+        for agent_id, _, _ in vehicles:
+            result[agent_id] = float("inf")
+        return result
+
+    vru_arr = np.array(vrus, dtype=np.float32)
+    for agent_id, vx, vy in vehicles:
+        pos = np.array([vx, vy], dtype=np.float32)
+        d = float(np.min(np.linalg.norm(vru_arr - pos, axis=1)))
+        result[agent_id] = d
+
+    return result
 
 
 def _get_corners(state: AgentState) -> NDArray[np.float32]:
