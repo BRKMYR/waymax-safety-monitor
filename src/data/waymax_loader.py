@@ -82,55 +82,67 @@ def load_womd_scenario(
 
 
 def _convert_waymax_state(state: object) -> Scenario:
-    """Convert a Waymax SimulatorState to our Scenario format."""
-    import jax.numpy as jnp
+    """Convert a Waymax SimulatorState to our Scenario format.
 
-    sim_trajectory = state.sim_trajectory
-    log_trajectory = state.log_trajectory
+    Written against the waymax 0.2 SimulatorState API. If the field names
+    or shapes have drifted in a newer waymax release the AttributeError is
+    re-raised with an actionable hint.
+    """
+    try:
+        import jax.numpy as jnp
 
-    # Use log trajectory for ground-truth data
-    traj = log_trajectory
+        log_trajectory = state.log_trajectory
 
-    num_objects = int(traj.x.shape[0])
-    num_timesteps = int(traj.x.shape[1])
+        # Use log trajectory for ground-truth data
+        traj = log_trajectory
 
-    agents = []
-    for obj_idx in range(num_objects):
-        valid = np.array(traj.valid[obj_idx], dtype=bool)
-        if not valid.any():
-            continue
+        num_objects = int(traj.x.shape[0])
+        num_timesteps = int(traj.x.shape[1])
 
-        obj_type_val = int(traj.object_type[obj_idx])
-        agent_type = _WOMD_AGENT_TYPES.get(obj_type_val, AgentType.VEHICLE)
+        agents = []
+        for obj_idx in range(num_objects):
+            valid = np.array(traj.valid[obj_idx], dtype=bool)
+            if not valid.any():
+                continue
 
-        agents.append(AgentTrajectory(
-            agent_id=obj_idx,
-            agent_type=agent_type,
-            x=np.array(traj.x[obj_idx], dtype=np.float32),
-            y=np.array(traj.y[obj_idx], dtype=np.float32),
-            heading=np.array(traj.yaw[obj_idx], dtype=np.float32),
-            vx=np.array(traj.vel_x[obj_idx], dtype=np.float32),
-            vy=np.array(traj.vel_y[obj_idx], dtype=np.float32),
-            length=float(jnp.mean(traj.length[obj_idx][valid])),
-            width=float(jnp.mean(traj.width[obj_idx][valid])),
-            valid=valid,
-        ))
+            obj_type_val = int(traj.object_type[obj_idx])
+            agent_type = _WOMD_AGENT_TYPES.get(obj_type_val, AgentType.VEHICLE)
 
-    road_graph = _extract_road_graph(state)
+            agents.append(AgentTrajectory(
+                agent_id=obj_idx,
+                agent_type=agent_type,
+                x=np.array(traj.x[obj_idx], dtype=np.float32),
+                y=np.array(traj.y[obj_idx], dtype=np.float32),
+                heading=np.array(traj.yaw[obj_idx], dtype=np.float32),
+                vx=np.array(traj.vel_x[obj_idx], dtype=np.float32),
+                vy=np.array(traj.vel_y[obj_idx], dtype=np.float32),
+                length=float(jnp.mean(traj.length[obj_idx][valid])),
+                width=float(jnp.mean(traj.width[obj_idx][valid])),
+                valid=valid,
+            ))
 
-    # Find ego (first valid vehicle or object index 0)
-    ego_id = 0
-    if agents:
-        ego_id = agents[0].agent_id
+        road_graph = _extract_road_graph(state)
 
-    return Scenario(
-        scenario_id=f"womd_{id(state)}",
-        num_timesteps=num_timesteps,
-        timestep_duration=0.1,
-        agents=agents,
-        road_graph=road_graph,
-        ego_agent_id=ego_id,
-    )
+        # Find ego (first valid vehicle or object index 0)
+        ego_id = 0
+        if agents:
+            ego_id = agents[0].agent_id
+
+        return Scenario(
+            scenario_id=f"womd_{id(state)}",
+            num_timesteps=num_timesteps,
+            timestep_duration=0.1,
+            agents=agents,
+            road_graph=road_graph,
+            ego_agent_id=ego_id,
+        )
+    except AttributeError as e:
+        raise AttributeError(
+            f"Waymax SimulatorState missing expected attribute: {e}. "
+            "This adapter is written against the waymax 0.2 API "
+            "(SimulatorState.log_trajectory, .roadgraph_points); verify "
+            "field names if your waymax version has drifted."
+        ) from e
 
 
 def _extract_road_graph(state: object) -> RoadGraph:

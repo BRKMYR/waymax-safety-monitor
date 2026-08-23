@@ -1,217 +1,140 @@
-# Waymax Safety Monitor Dashboard
+# Waymax Safety Monitor
 
-**Status: In Development — Q1 2026**
+Real-time safety monitoring dashboard for autonomous fleets: teleoperation trigger detection built on Waymax and the Waymo Open Motion Dataset.
 
-Real-time safety monitoring dashboard for autonomous fleets — teleoperation trigger detection built on Waymax and Waymo Open Motion Dataset.
+An operations monitoring surface, not a simulator. It answers one question: **when should a remote operator take over?**
 
-This is an operations monitoring screen, not a simulator. It answers one question: **when should a remote operator take over?**
+The dashboard consumes 91-timestep (9.1 s at 10 Hz) driving scenarios in the Waymax / WOMD shape, computes per-agent safety metrics, and fires edge-triggered teleoperation events (AMBER escalating to RED) with per-agent kind fields (TTC, overlap, off-road, wrong-way, lane compliance, composite, hard-brake, stalled, VRU proximity).
 
----
+## Quickstart
 
-## Why This Matters
+Requires Python 3.11+.
 
-Commercial robotaxi fleets rely on remote human operators as a safety backstop. This is not a failure mode; it is the architecture. Waymo, Cruise, and Zoox all employ teleoperators who can intervene when a vehicle encounters a situation beyond its autonomous capabilities. The ratio of operators to vehicles, the latency of intervention, and the decision criteria for when to intervene are among the most operationally critical parameters in any commercial AV deployment.
+```bash
+git clone https://github.com/BRKMYR/waymax-safety-monitor.git
+cd waymax-safety-monitor
+pip install -e ".[dev]"
 
-The unsolved problem is **when** to trigger teleoperation. Too early wastes expensive human operator time and reduces fleet throughput. Too late creates safety incidents. Current approaches are largely reactive: the vehicle requests help when it is already stuck or uncertain. A monitoring dashboard enables **proactive** intervention by giving operators situational awareness before the vehicle reaches a failure state.
+# Interactive dashboard on a bundled synthetic scenario.
+safety-monitor --scenario intersection_conflict
 
-This project uses real driving data from the Waymo Open Motion Dataset — logged scenarios from Waymo's fleet operating in San Francisco and Phoenix. These are not synthetic toy environments. They contain the full complexity of urban driving: unprotected turns, pedestrian crossings, cyclists, construction zones, and multi-agent interactions that expose the edge cases where teleoperation decisions matter most.
+# Or as a module:
+python -m src.dashboard.app --scenario hard_brake
+```
 
-The gap between "autonomous vehicle that works in simulation" and "autonomous fleet that operates commercially" is an operations problem. This dashboard sits in that gap.
+Keyboard: Space play/pause, arrows step, +/- speed, F fit view, R reset, Home/End jump, 1-5 switch scenario, Q/Esc quit. Mouse: drag to pan, scroll to zoom, click on the playback bar to scrub, click on the timeline to jump.
 
----
+## Bundled scenarios
 
-## What This Project Does
+All five ship in the repo. No dataset download required.
 
-Takes Waymax scenarios — each containing 9.1 seconds of multi-agent driving data from real San Francisco and Phoenix roads — runs them through a safety analysis pipeline, and renders the results as a real-time ops dashboard in pygame. The dashboard shows what a fleet safety operator would see: a tactical map of the scenario, risk indicators per vehicle, teleoperation trigger alerts, and an event timeline.
+| Key | Name | Description | Notable trigger |
+|-----|------|-------------|-----------------|
+| 1 | `intersection_conflict` | 4-way intersection, five vehicles, one pedestrian, one cyclist, signalized | Multiple TTC + composite events |
+| 2 | `highway_merge` | Three-lane highway, ramp merger cutting into ego lane | TTC / composite on merge |
+| 3 | `pedestrian_crossing` | Two-lane road with two pedestrians on a crosswalk | VRU proximity on ego |
+| 4 | `hard_brake` | Lead vehicle decelerates at -6 m/s^2 at t=31 (noise-free) | `hard_brake` RED at (agent 1, t=31) |
+| 5 | `stalled_ego` | Ego rolls to a stop; dwell-counter completes at t=68 (noise-free) | `stalled` RED at (agent 0, t=68) |
 
-What this is **not**:
+`hard_brake` and `stalled_ego` are analytically constructed and byte-identical across seeds; the other three include per-timestep Gaussian jitter seeded by `--seed` (default 42).
 
-- Not a self-driving stack. No perception, no planning, no control.
-- Not a simulator. Waymax is the simulator. This is a monitoring layer on top.
-- Not a web app. Native 2D rendering for full control over the visual output and update loop.
+## Configuring the run
 
----
+Trigger thresholds ship as three presets:
 
-## Dashboard Components
+```bash
+safety-monitor --scenario intersection_conflict --policy conservative
+safety-monitor --scenario intersection_conflict --policy default
+safety-monitor --scenario intersection_conflict --policy permissive
+```
 
-### 1. Top-Down Scenario Viewer
+A JSON run-config selects scenario, seed, trigger policy, per-field trigger overrides, and risk-scoring weights. See `scenarios/default.json`. Unknown keys raise a config error rather than being silently ignored.
 
-Renders the Waymax road graph — lanes, crosswalks, stop signs, speed bumps, road boundaries — as a 2D tactical map. All agents (ego vehicle, other vehicles, pedestrians, cyclists) are drawn as oriented bounding boxes with heading indicators. The viewer supports scenario playback: play, pause, step forward, step backward, and timeline scrubbing across all 91 timesteps.
+```bash
+safety-monitor --config scenarios/default.json
+```
 
-The coordinate system comes directly from Waymax. No projection pipeline needed; the data is already in local metric coordinates centered on the ego vehicle.
+CLI flags win over config-file values, so `--config scenarios/default.json --policy permissive` uses the permissive preset with everything else from the file.
 
-### 2. Per-Vehicle Risk Indicators
+## Headless mode: screenshots and CI
 
-Each vehicle carries a colored halo indicating its current risk level:
+The dashboard runs without a display via SDL's dummy driver. It writes one PNG per timestep and a sorted `events.json` for offline inspection.
 
-| Level | Meaning |
-|-------|---------|
-| **GREEN** | Nominal. No safety concerns detected. |
-| **AMBER** | Elevated risk. One or more metrics approaching thresholds. Operator should monitor. |
-| **RED** | Critical. Immediate teleoperation trigger. Operator intervention recommended. |
+```bash
+safety-monitor \
+  --scenario hard_brake \
+  --headless \
+  --frames-out docs/screenshots/hard_brake \
+  --events-out docs/screenshots/hard_brake/events.json \
+  --frame-stride 1
+```
 
-Risk classification is computed per timestep from a composite of proximity, speed, lane compliance, and heading alignment metrics. Halos are rendered as semi-transparent rings around the vehicle bounding box, with intensity proportional to risk severity.
+Frames are named `frame_000.png` .. `frame_090.png`. Events are sorted by `(timestep, agent_id, kind)` and every entry carries `agent_id, agent_type, timestep, time_seconds, severity, kind, reason, metric_value`. This is the same path CI runs to assert that the `hard_brake` scenario emits exactly one `hard_brake` RED event at `(agent_id=1, timestep=31)`.
 
-### 3. Teleoperation Trigger Panel
+Use `--frame-stride 10` to keep only every tenth frame (useful for compact demo GIFs).
 
-A side panel listing vehicles that have crossed intervention thresholds. Each trigger entry shows:
+## Loading real WOMD data (optional)
 
-- Vehicle ID
-- Trigger reason (e.g., "TTC < 2.0s with pedestrian", "off-road excursion", "wrong-way heading")
-- Severity (amber / red)
-- Timestamp within the scenario
+Waymo Open Motion Dataset support ships as an optional extra to keep the base install lightweight:
 
-Trigger conditions are configurable. Thresholds can be adjusted to model different operator intervention policies — conservative (trigger early, high operator load) versus permissive (trigger late, higher autonomy trust).
+```bash
+pip install -e ".[waymax]"
+safety-monitor --womd-path /path/to/womd.tfrecord --womd-index 0
+```
 
-### 4. Incident Timeline
+Data access requires registration at [waymo.com/open](https://waymo.com/open); the license is non-commercial research use. The Waymax adapter is written against the waymax 0.2 API (`SimulatorState.log_trajectory`, `.roadgraph_points`); mismatches raise a clearly labeled `AttributeError`.
 
-A scrollable chronological log of safety events during scenario playback. Events include near-misses, lane departures, speed violations, bounding box overlaps, and teleoperation triggers. Each event entry is timestamped relative to scenario start (0.0s to 9.1s) and selectable — clicking an event jumps the scenario viewer to that timestep.
+## Safety metrics
 
-The timeline serves as both a real-time feed during playback and a post-hoc analysis tool for reviewing what happened and when.
+| Metric | Description |
+|--------|-------------|
+| Overlap | Bounding-box overlap fraction between any two agents |
+| TTC | Time to collision estimated from current-frame positions, velocities, and bounding boxes |
+| Off-road | Fraction of ego bounding box outside road edges. Pedestrians are excluded (return 0). |
+| Wrong-way | Heading misalignment with the closest lane-center segment. Direction is encoded by the ordering of lane points. Pedestrians excluded. |
+| Lane compliance | Combined lateral offset from lane center + heading alignment. Pedestrians excluded (return 1.0). |
+| Composite | Weighted sum, gated by AMBER / RED thresholds. Weights live in `RiskConfig`. |
+| Hard brake | Per-vehicle longitudinal acceleration <= configured floor (default -4 m/s^2). |
+| Stalled | Vehicle speed below floor for a dwell counter of consecutive timesteps. |
+| VRU proximity | Vehicle within a distance floor of a pedestrian or cyclist, gated on ego speed. |
 
-### 5. Fleet Aggregate Panel
+The trigger engine is edge-triggered: a given `(agent_id, kind)` pair fires exactly once at the inactive-to-active transition, and again on an AMBER -> RED escalation. After the condition clears for `rearm_clear_steps` consecutive steps the pair re-arms.
 
-Top-level statistics across all agents in the current scenario:
-
-- Fleet safety score (weighted composite of all per-vehicle risk scores)
-- Total violations by category (overlap, off-road, wrong-way)
-- Total teleoperation triggers fired
-- Worst-case vehicle and worst-case timestep
-- Agent count breakdown (vehicles, pedestrians, cyclists)
-
----
-
-## Safety Metrics
-
-| Metric | Source | Description |
-|--------|--------|-------------|
-| Collision / Overlap | Waymax `overlap` | Bounding box overlap between any two agents |
-| Off-Road | Waymax `offroad` | Vehicle center or bounding box outside drivable area |
-| Wrong-Way | Waymax `wrong_way` | Vehicle heading misaligned with lane direction |
-| Log Divergence | Waymax `log_divergence` | Deviation from the recorded real-world trajectory |
-| Time to Collision (TTC) | Custom | Estimated time until bounding box intersection at current velocities |
-| Lane Compliance Score | Custom | Composite of lateral offset from lane center and heading alignment |
-
-Waymax provides the first four metrics natively through its reward/metric API. TTC and lane compliance are custom metrics computed from Waymax state data (agent positions, velocities, headings, and road graph geometry).
-
-The composite risk score that drives the green/amber/red classification is a weighted combination of all six metrics, with weights configurable per deployment policy.
-
----
-
-## Visual Design
-
-The dashboard uses a dark theme, high contrast aesthetic. Design principles:
-
-- **Dark background** with light road graph edges and muted lane boundaries. The map recedes; operational data comes forward.
-- **Agent bounding boxes** rendered as oriented rectangles with heading arrows. Ego vehicle visually distinct from other agents.
-- **Risk halos** as semi-transparent colored rings around vehicles. Color intensity scales with risk severity.
-- **Side panels** use monospace text for the teleoperation trigger list and incident timeline. Dense, scannable, no decoration.
-- **Information hierarchy** controlled by visual weight. Critical alerts (red halos, active triggers) dominate. Nominal state (green halos, empty timeline) fades into the background.
-
-The visual language is deliberately utilitarian — closer to an air traffic control display than a consumer ride-hailing app. Every pixel carries operational meaning.
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|------------|
-| Simulation Engine | Waymax (JAX-based) |
-| Driving Data | Waymo Open Motion Dataset (WOMD) |
-| 2D Rendering | pygame-ce |
-| Computation | JAX, NumPy |
-| Safety Metrics | Waymax metrics + custom |
-| Language | Python |
-
-The stack is intentionally minimal. Waymax provides the simulation backbone and data pipeline. pygame-ce provides the rendering surface. Everything between is Python and NumPy.
-
-JAX is required as a Waymax dependency. GPU acceleration via CUDA is beneficial for batch scenario processing but not mandatory — JAX runs on CPU for single-scenario dashboard use.
-
----
-
-## Data
-
-This project uses the **Waymo Open Motion Dataset (WOMD)**, which contains real logged driving scenarios from Waymo's autonomous fleet operating in San Francisco and Phoenix.
-
-- Each scenario is approximately 9.1 seconds at 10Hz (91 timesteps)
-- Scenarios contain: full road graph (lanes, boundaries, crosswalks, signals), all agent trajectories (vehicles, pedestrians, cyclists), and traffic signal states
-- The dataset contains 100,000+ scenarios covering diverse urban driving situations
-- Data access requires free registration at [waymo.com/open](https://waymo.com/open)
-
-The dataset is available for non-commercial research use under the Waymo Open Dataset License. This is real driving data, not synthetic generation — every scenario in the dataset was recorded by a Waymo vehicle on public roads.
-
----
-
-## Project Roadmap
-
-### Phase 1: Data Pipeline and Scenario Rendering
-
-- Set up Waymax data loading from WOMD
-- Parse road graph (lanes, crosswalks, boundaries, traffic signals)
-- Render top-down scenario view in pygame-ce (road graph + agent bounding boxes)
-- Implement scenario playback controls (play, pause, step, scrub)
-
-### Phase 2: Safety Metrics Engine
-
-- Integrate Waymax built-in metrics (overlap, offroad, wrong_way, log_divergence)
-- Implement custom TTC calculation between all agent pairs
-- Build lane compliance scoring from road graph geometry
-- Compute per-vehicle composite risk score (green / amber / red classification)
-- Render risk halos on the scenario viewer
-
-### Phase 3: Teleoperation Trigger System
-
-- Define configurable trigger thresholds (TTC < Xs, risk score > Y)
-- Build trigger detection engine evaluating every timestep
-- Render teleoperation trigger panel with live alerts
-- Build incident timeline with event logging
-- Implement timeline-to-viewer linking (click event to jump to timestep)
-
-### Phase 4: Fleet Dashboard and Polish
-
-- Aggregate statistics panel (fleet safety score, violation counts)
-- Multi-scenario batch analysis (run N scenarios, aggregate results)
-- Dashboard layout refinement and visual polish
-- Screenshot and recording export for presentation
-- Documentation and usage guide
-
----
-
-## Project Structure
+## Layout
 
 ```
 waymax-safety-monitor/
-├── src/
-│   ├── data/           # Waymax data loading and preprocessing
-│   ├── metrics/        # Safety metrics (built-in + custom TTC, lane compliance)
-│   ├── triggers/       # Teleoperation trigger logic and thresholds
-│   ├── renderer/       # pygame-ce rendering (map, agents, halos, panels)
-│   └── dashboard/      # Dashboard layout, state management, playback controls
-├── scenarios/          # Sample scenario configurations
-├── tests/
-├── README.md
-└── pyproject.toml
+  src/
+    data/         # scenario dataclasses, demo generator, WOMD loader (optional)
+    metrics/      # safety metrics + composite risk
+    triggers/     # thresholds, edge-triggered engine, trigger events
+    renderer/     # map, agents, panels (pygame-ce)
+    dashboard/    # state, layout, headless mode, event loop
+  scenarios/      # run-config JSONs
+  tests/
+  docs/
+  pyproject.toml
 ```
 
----
+## Tests
+
+```bash
+pytest -v
+```
+
+Coverage highlights:
+
+- Analytic acceptance: `hard_brake` fires exactly one `hard_brake` RED at `(1, 31)`; `stalled_ego` fires exactly one `stalled` RED at `(0, 68)`.
+- Edge-trigger semantics: single event per active window; AMBER->RED escalation emits two events; re-arm after `rearm_clear_steps`.
+- Determinism: two independent headless runs of `hard_brake` produce byte-identical `events.json`.
+- Pedestrian exclusion for off-road, wrong-way, and lane-compliance metrics.
+- Kind integrity: every fired event's `kind` is in the closed set defined in `docs/ARCHITECTURE.md`.
 
 ## References
 
-- **Waymax** — Gulino et al., "Waymax: An Accelerated, Data-Driven Simulator for Large-Scale Autonomous Driving Research" (2023). [GitHub](https://github.com/waymo-research/waymax)
-- **Waymo Open Motion Dataset** — Ettinger et al., "Large Scale Interactive Motion Forecasting for Autonomous Driving: The Waymo Open Motion Dataset" (2021). [waymo.com/open](https://waymo.com/open)
-- **SAE J3016** — Taxonomy and definitions for terms related to driving automation systems
-- **ISO 34503** — Taxonomy for [redacted] for automated driving systems
-
----
+- Gulino et al., "Waymax: An Accelerated, Data-Driven Simulator for Large-Scale Autonomous Driving Research", 2023.
+- Ettinger et al., "Large Scale Interactive Motion Forecasting for Autonomous Driving: The Waymo Open Motion Dataset", 2021.
 
 ## License
 
-MIT
-
-This project's source code is MIT licensed. Note that Waymax and the Waymo Open Motion Dataset have their own license terms (non-commercial research use). See their respective repositories for details.
-
----
-
-## Author
-
-[BRKMYR](https://github.com/BRKMYR)
+MIT. Waymax and the Waymo Open Motion Dataset carry their own (non-commercial research) licenses; see their upstream repos.
