@@ -1,5 +1,7 @@
 # Waymax Safety Monitor
 
+[![tests](https://github.com/BRKMYR/waymax-safety-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/BRKMYR/waymax-safety-monitor/actions/workflows/ci.yml)
+
 Real-time safety monitoring dashboard for autonomous fleets: teleoperation trigger detection on driving scenarios in the Waymax and Waymo Open Motion Dataset (WOMD) data shape. The shipped demo runs on synthetic scenes; an optional adapter loads real WOMD scenarios through Waymax if you have access to the dataset.
 
 An operations monitoring surface, not a simulator. It answers one question: **when should a remote operator take over?**
