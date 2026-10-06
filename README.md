@@ -1,6 +1,6 @@
 # Waymax Safety Monitor
 
-Real-time safety monitoring dashboard for autonomous fleets: teleoperation trigger detection built on Waymax and the Waymo Open Motion Dataset.
+Real-time safety monitoring dashboard for autonomous fleets: teleoperation trigger detection on driving scenarios in the Waymax and Waymo Open Motion Dataset (WOMD) data shape. The shipped demo runs on synthetic scenes; an optional adapter loads real WOMD scenarios through Waymax if you have access to the dataset.
 
 An operations monitoring surface, not a simulator. It answers one question: **when should a remote operator take over?**
 
@@ -137,4 +137,4 @@ Coverage highlights:
 
 ## License
 
-MIT. Waymax and the Waymo Open Motion Dataset carry their own (non-commercial research) licenses; see their upstream repos.
+MIT, see [LICENSE](LICENSE). Waymax and the Waymo Open Motion Dataset carry their own non-commercial research licenses and are not included: the Waymax adapter is an optional extra, and dataset access requires your own registration at waymo.com/open.
